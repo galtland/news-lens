@@ -3,26 +3,30 @@
 > Working draft for a fork/derivative of `news-tagger` that comments on news from
 > an Austrian-libertarian perspective using the `llm-wiki` corpus as ground truth.
 
-Status: **draft / pre-implementation**, revision 3.
+Status: **draft / pre-implementation**, revision 4.
 
 Working name: **news-lens**. Bikeshed later.
 
 ---
 
-## 0. Locked-in decisions (revision 3)
+## 0. Locked-in decisions (revision 4)
 
-These are settled. The rest of the spec elaborates them. Items struck through were locked in earlier revisions but superseded by the v3 simplification.
+These are settled. The rest of the spec elaborates them. Items struck through were locked in earlier revisions but superseded by later simplifications.
 
 1. **Hard fork** of `news-tagger`, not a mode added to it.
 2. **Single-wiki for v1.** One topic-wiki path, one lens.
 3. **The wiki is the system of record.** news-lens is a contributor.
-4. **Single agentic call per post.** One harness invocation does ingest, optional commentary, and lint in one transaction. No separate prefilter / commenter / ingest roles in v1. The complexity removed is enormous; we'll add structure back only when measurement demands it. (§5)
+4. **Single agentic call per post.** One harness invocation does ingest, optional commentary, and lint in one transaction. No separate prefilter / commenter / ingest roles in v1. (§5)
 5. **No upstream skill changes.** The agent is invoked with a hand-crafted prompt that orchestrates existing skills (`/wiki:ingest`, `/wiki:lint --fix`). A wrapper skill is a v2 option only if the prompt becomes unmaintainable.
 6. **Block-then-publish.** Replies are only published after the agent confirms the thesis exists at a known slug.
 7. **Source of truth for "what's been done" is split:** filesystem for wiki facts (raw news, theses); `state.sqlite` for platform facts (fetch cursor, X/Nostr post IDs).
-8. ~~Three LLM roles with separate config blocks~~ — superseded by #4. One harness, one config block.
-9. ~~Three-pass CLI (ingest / comment / publish)~~ — collapsed. One agent call per post + one publish step.
-10. ~~Outbox staging directory + slug-claim mechanism~~ — agent picks slugs inside the call; no staging.
+8. **KISS for v1: pick the smallest viable answer for every open question.** No retries, no quarantine, no dedup, no budget tracking, no concurrency, no lens versioning. Each is documented in §12 with the trigger that would justify adding it back. (§12)
+9. ~~Three LLM roles with separate config blocks~~ — superseded by #4. One harness, one config block.
+10. ~~Three-pass CLI (ingest / comment / publish)~~ — collapsed. One agent call per post + one publish step.
+11. ~~Outbox staging directory + slug-claim mechanism~~ — agent picks slugs inside the call; no staging.
+12. ~~Per-wiki mutex / concurrency control~~ — superseded by #8. v1 processes posts strictly serially; no concurrency to control.
+13. ~~Per-call cost tracking + daily budget breaker~~ — superseded by #8. Only `[harness] timeout_secs` in v1.
+14. ~~Quarantine + auto-retry on agent failure~~ — superseded by #8. Failures record `stance=failed` and stop.
 
 ---
 
@@ -56,7 +60,7 @@ These are settled. The rest of the spec elaborates them. Items struck through we
 
 A hard fork is the right move because the output shape and corpus shape both genuinely differ from news-tagger. `ClassifyOutput.tags[]` is a discrete bucket assignment; `Commentary` is one piece of prose with citations. `TagDefinition` is a single short rule; a wiki article is a long, hyperlinked node in a graph. Trying to unify them in one binary poisons every downstream consumer for no real reuse.
 
-Under the v3 single-agent design, the fork is also much smaller than originally planned: roughly the post sources, state store, publishers, run loop, and a thin subprocess wrapper. The 9 LLM provider adapters are dropped (§4) because the harness owns provider selection.
+Under the v3/v4 single-agent KISS design, the fork is also much smaller than originally planned: roughly the post sources, state store, publishers, a serial run loop, and a thin subprocess wrapper. The 9 LLM provider adapters are dropped (§4) because the harness owns provider selection.
 
 ---
 
@@ -134,22 +138,21 @@ Task:
    - Write it to wiki/theses/<slug>.md.
 4. Run /wiki:lint --fix to heal indexes, See Also backlinks, log.md.
 5. Print the final line as a single JSON object:
-   { "stance": "...", "raw_path": "...", "thesis_path": "...?",
-     "thesis_slug": "...?", "lint_warnings": N, "lint_critical": N }
+   { "stance": "...", "raw_path": "...", "raw_slug": "...",
+     "thesis_path": "...?", "thesis_slug": "...?", "one_liner": "...?" }
 
 Constraints:
 - Never invent positions the wiki does not hold.
 - Never cite slugs that don't exist.
-- Keep the one_liner you'd put in a reply <= 240 chars; include it as
-  the first paragraph of the thesis after the H1.
-- If lint_critical > 0, leave the thesis in place but flag it in the JSON.
+- Keep one_liner <= 240 chars; include it as the first paragraph of the
+  thesis after the H1.
 ```
 
 The prompt template is shipped with news-lens at `prompts/process-post.md`. It substitutes `<path>`, `<lens_path>`, post text, post metadata, and a deterministic candidate slug.
 
 ### Concurrency
 
-Multiple agent invocations on the same wiki race on `_index.md` and `log.md`. v1 serializes them: `mutex` per wiki path. Multiple wikis (v2) get separate mutexes. Post fetching and publishing are not serialized.
+v1 is strictly serial: one post at a time, one harness call at a time. The run loop is a plain `for` over fetched posts. No mutex, no parallel tasks — there is no concurrency to control. Throughput is a Phase 5 concern (§11).
 
 ### Slug determinism
 
@@ -233,7 +236,6 @@ command         = "claude"
 args            = ["--print"]
 prompt_template = "/home/user/news-lens/prompts/process-post.md"
 timeout_secs    = 600
-serialize_per_wiki = true   # mutex agent calls against the same wiki path
 
 [watch]
 poll_interval_secs = 300
@@ -252,13 +254,9 @@ mode    = "reply"
 [nostr]
 enabled = false
 relays  = ["wss://relay.damus.io"]
-
-[budget]
-daily_dollar_limit = 10.00
-on_exceed = "halt"   # halt | warn
 ```
 
-Cost-control is by dollar limit, not token limit, since the harness reports its own cost in stdout in some configurations. If unavailable, news-lens falls back to a per-call cap.
+Eight blocks total. No `[budget]`, no per-call cost tracking. `timeout_secs` is the only per-call guardrail; watch your provider dashboard the first few weeks of use. A daily-post cap is the natural place to grow if you need it (§12).
 
 ---
 
@@ -271,19 +269,19 @@ Cost-control is by dollar limit, not token limit, since the harness reports its 
   "raw_slug": "2026-05-07-argentina-rent-decontrol",
   "thesis_path": "wiki/theses/on-argentina-rent-decontrol.md",
   "thesis_slug": "on-argentina-rent-decontrol",
-  "one_liner": "The cap simply cuts the supply they were going to consume — see [[state-power-and-intervention]].",
-  "lint_warnings": 0,
-  "lint_critical": 0
+  "one_liner": "The cap simply cuts the supply they were going to consume — see [[state-power-and-intervention]]."
 }
 ```
 
 Validation by news-lens before publishing:
+- `stance` is one of `endorse | critique | contextualize | decline | failed`.
 - `raw_path` must exist on disk.
-- If `stance != "decline"`: `thesis_path` and `thesis_slug` must be present and exist.
-- `one_liner.len() <= 240` (we'll truncate gently if not).
-- `lint_critical == 0` — otherwise quarantine the thesis (move to a `quarantine/` sibling) and skip publishing. Manual review.
+- If `stance != "decline"`: `thesis_path`, `thesis_slug`, `one_liner` must be present, and the path must exist.
+- `one_liner.len() <= 240` (truncate gently if not).
 
-The agent returning malformed JSON or a missing path counts as a transient failure: log + retry once. After two failures, mark the post `failed` in state and move on.
+Failure mode is simple: malformed JSON, missing path, timeout, or any harness error → record `stance='failed'` in state with whatever fields the agent did return, and move on to the next post. No retries, no quarantine. The user re-runs by hand via `news-lens process --post <id>` if they want.
+
+If `wiki:lint` reports criticals during the agent's run, that's the agent's problem to handle (it called `lint --fix`); news-lens doesn't post-check. Broken wiki state surfaces the next time someone runs `/wiki:lint` interactively.
 
 ---
 
@@ -300,8 +298,7 @@ CREATE TABLE processed_posts (
     raw_path         TEXT,                 -- relative to wiki root
     thesis_slug      TEXT,                 -- nullable when stance=decline|failed
     x_post_id        TEXT,                 -- nullable
-    nostr_event_id   TEXT,                 -- nullable
-    cost_usd         REAL                  -- harness-reported, nullable
+    nostr_event_id   TEXT                  -- nullable
 );
 
 CREATE TABLE account_state (
@@ -339,16 +336,22 @@ None of these require rearchitecture; each is a localized split.
 
 ---
 
-## 12. Open questions
+## 12. Deferred decisions
 
-1. **News deduplication.** Two accounts post the same news — agent should detect existing raw news (it can grep) and reuse it, attaching the new post URL as another `source:` reference. Verify the prompt encourages this.
-2. **What counts as "news" worth fetching.** Pre-fetch filter knobs (`include_replies`, `include_threads`, `min_text_chars`) stay in config. The agent's Decline handles the rest.
-3. **Lens versioning.** If you tweak the lens, should past commentary be regenerated? v1: no. Re-run by hand on selected posts (`process --post <id> --force`) when you want to.
-4. **Harness failure modes.** Timeout / lint criticals / malformed JSON — quarantine policy in §9. Open question is whether to auto-retry transient errors with backoff. Default: one retry, then fail-and-move-on.
-5. **Cost runaway.** A misbehaving agent can spend an unlimited budget on a single post. Need per-call hard cap (timeout + token limit if the harness exposes it). Daily budget circuit breaker is the safety net.
-6. **Concurrency limits.** Single-wiki serialization is enforced; what's the right max for parallel post processing across wikis? Defer until multi-wiki.
-7. **Thesis re-edit.** What if the agent wants to update an existing thesis (e.g., new news on the same story)? v1: it doesn't — each thesis is a single news's commentary. Updates happen by writing a *new* thesis that cross-links. Revisit if this gets noisy.
-8. **Agent retrieval discipline.** The prompt tells the agent to read 5–12 articles. Without that ceiling the agent can read the entire wiki and blow the context budget. Worth measuring how strictly the agent obeys.
+Every entry below has a v1 default that picks the smallest viable answer. The trigger column says what would justify revisiting it.
+
+| # | Question | v1 default | Revisit trigger |
+|---|---|---|---|
+| 1 | **News dedup.** Same story from multiple accounts → multiple raw files / theses. | No dedup. Process every post. | `wiki status` reports noticeable raw-news duplication. |
+| 2 | **What counts as news worth fetching.** | Reuse news-tagger's existing pre-fetch filters (`include_replies`, `include_reposts`, `ignore_patterns`). Agent Decline handles the rest. | Decline rate exceeds ~80% — then tighten with `min_text_chars`. |
+| 3 | **Lens versioning.** Old commentary stays under the old lens. | No lens hash, no `--force`. To re-run, delete the row in `state.sqlite` by hand and re-run `process --post <id>`. | You find yourself doing this more than once a month. |
+| 4 | **Harness failure modes.** | No retries, no quarantine. Failure → `stance='failed'` in state, move on. | Transient errors visibly drop posts you wanted to comment on. |
+| 5 | **Cost runaway.** | `[harness] timeout_secs` only. No daily budget, no per-row cost. Watch the provider dashboard. | First surprise bill → add `max_posts_per_day` halt counter. |
+| 6 | **Concurrency.** | Strictly serial. One post at a time. | Throughput becomes the bottleneck. |
+| 7 | **Thesis re-edit on developing stories.** | Never. New news → new thesis with cross-links. | Story-chain repetition is visibly noisy. |
+| 8 | **Agent retrieval discipline.** | Trust the prompt's "read 5–12 articles" instruction. No enforcement. | `timeout_secs` keeps hitting because the agent reads too much. |
+
+The pattern: each "no" in v1 saves real code. Each becomes a localized addition when measurement justifies it — none requires rearchitecture.
 
 ---
 
