@@ -21,11 +21,15 @@ use crate::commands::common::{
 use crate::config::AppConfig;
 
 pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<()> {
+    if args.post.is_none() && args.jsonl.is_none() {
+        bail!("Expected --post or --jsonl");
+    }
+
     let config = AppConfig::load(config_path.as_deref())?;
-    let lens = load_configured_lens(&config)?;
-    let harness = build_harness(&config);
 
     if let Some(post_arg) = args.post {
+        let lens = load_configured_lens(&config)?;
+        let harness = build_harness(&config)?;
         if args.dry_run {
             tracing::info!(
                 "--dry-run is implicit for process --post; no state or publishing occurs"
@@ -48,6 +52,8 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
     }
 
     if let Some(path) = args.jsonl {
+        let lens = load_configured_lens(&config)?;
+        let harness = build_harness(&config)?;
         let mut state_dry_run = args.dry_run || config.general.dry_run;
         if args.require_approval && state_dry_run {
             tracing::info!(
@@ -99,7 +105,7 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
         return Ok(());
     }
 
-    bail!("Expected --post or --jsonl")
+    unreachable!("process argument shape was checked before loading config")
 }
 
 async fn resolve_single_post(
@@ -164,7 +170,7 @@ fn looks_like_x_post_id(value: &str) -> bool {
 
 fn synthetic_post(post_id: Option<String>, text: String) -> Result<SourcePost> {
     let id = match post_id {
-        Some(value) if !value.trim().is_empty() => value,
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
         Some(_) | None => "cli-input".to_string(),
     };
 
@@ -195,6 +201,14 @@ mod tests {
 
         assert_eq!(post.id, "source-123");
         assert_eq!(post.text, "body");
+    }
+
+    #[test]
+    fn synthetic_post_trims_explicit_id() {
+        let post = synthetic_post(Some("  source-123  ".to_string()), "body".to_string())
+            .expect("synthetic post");
+
+        assert_eq!(post.id, "source-123");
     }
 
     #[test]

@@ -42,9 +42,10 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
         lenses.push(load_lens(configured_path)?);
     }
 
-    let Some(parent) = configured_path.parent() else {
-        return Ok(lenses);
-    };
+    let parent = configured_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
 
     if !parent.exists() {
         if lenses.is_empty() {
@@ -76,4 +77,14 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
     lenses.sort_by(|a, b| a.id.cmp(&b.id));
     lenses.dedup_by(|a, b| a.id == b.id);
     Ok(lenses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_lenses_treats_bare_relative_parent_as_current_directory() {
+        discover_lenses(Path::new("lens.md")).expect("bare relative path");
+    }
 }

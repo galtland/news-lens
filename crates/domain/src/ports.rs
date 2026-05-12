@@ -51,10 +51,14 @@ pub trait PostSource: Send + Sync {
 pub enum HarnessError {
     #[error("IO error: {0}")]
     Io(String),
-    #[error("process exited with status {status}: {stderr}")]
+    #[error(
+        "process exited with status {status}: {stderr}; stdout tail: {stdout_tail}; parse error: {parse_error:?}"
+    )]
     Exit {
         status: String,
         stderr: String,
+        stdout_tail: String,
+        parse_error: Option<String>,
         raw: Option<Box<RawAgentReturn>>,
     },
     #[error("process timed out after {timeout_secs}s")]

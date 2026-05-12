@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use regex::Regex;
 
 use crate::{
@@ -453,17 +452,11 @@ pub fn candidate_slug(post: &SourcePost) -> String {
     }
 }
 
-#[async_trait]
-impl<H: Harness + ?Sized> Harness for &H {
-    async fn process_post(&self, ctx: PostContext) -> Result<AgentReturn, HarnessError> {
-        (*self).process_post(ctx).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ports::{PostSourceError, PublishError, PublishResult};
+    use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
     use time::OffsetDateTime;
@@ -538,6 +531,8 @@ mod tests {
             Err(HarnessError::Exit {
                 status: "exit status: 7".to_string(),
                 stderr: "cleanup failed".to_string(),
+                stdout_tail: String::new(),
+                parse_error: None,
                 raw: Some(Box::new(RawAgentReturn {
                     stance: Some("decline".to_string()),
                     raw_path: Some("raw/news/partial.md".to_string()),

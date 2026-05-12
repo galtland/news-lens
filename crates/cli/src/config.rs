@@ -383,6 +383,15 @@ relays = ["wss://relay.damus.io"]
         if self.watch.poll_interval_secs == 0 {
             anyhow::bail!("watch.poll_interval_secs must be greater than 0");
         }
+        if self.lens.id.trim().is_empty() {
+            anyhow::bail!("lens.id must not be empty");
+        }
+        if self.harness.command.trim().is_empty() {
+            anyhow::bail!("harness.command must not be empty");
+        }
+        if self.harness.timeout_secs == 0 {
+            anyhow::bail!("harness.timeout_secs must be greater than 0");
+        }
         Ok(())
     }
 }
@@ -400,6 +409,28 @@ mod tests {
         let error = AppConfig::load(Some(&path)).expect_err("invalid config");
 
         assert!(error.to_string().contains("poll_interval_secs"));
+    }
+
+    #[test]
+    fn load_rejects_empty_lens_id() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[lens]\nid = \"  \"\n").expect("write config");
+
+        let error = AppConfig::load(Some(&path)).expect_err("invalid config");
+
+        assert!(error.to_string().contains("lens.id"));
+    }
+
+    #[test]
+    fn load_rejects_empty_harness_command() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[harness]\ncommand = \"  \"\n").expect("write config");
+
+        let error = AppConfig::load(Some(&path)).expect_err("invalid config");
+
+        assert!(error.to_string().contains("harness.command"));
     }
 
     #[test]

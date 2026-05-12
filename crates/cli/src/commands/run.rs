@@ -35,7 +35,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     );
 
     let lens = load_configured_lens(&config)?;
-    let harness = Arc::new(build_harness(&config));
+    let harness = Arc::new(build_harness(&config)?);
     let state_store = Arc::new(
         SqliteStateStore::new(&config.general.state_db_path)
             .await

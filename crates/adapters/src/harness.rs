@@ -19,11 +19,17 @@ pub struct HarnessConfig {
 #[derive(Debug, Clone)]
 pub struct SubprocessHarness {
     config: HarnessConfig,
+    prompt_template: String,
 }
 
 impl SubprocessHarness {
-    pub fn new(config: HarnessConfig) -> Self {
-        Self { config }
+    pub fn new(config: HarnessConfig) -> Result<Self, HarnessError> {
+        let prompt_template = std::fs::read_to_string(&config.prompt_template)
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
+        Ok(Self {
+            config,
+            prompt_template,
+        })
     }
 
     pub fn command(&self) -> &str {
@@ -34,18 +40,14 @@ impl SubprocessHarness {
         &self.config.prompt_template
     }
 
-    async fn render_prompt(&self, ctx: &PostContext) -> Result<String, HarnessError> {
-        let template = tokio::fs::read_to_string(&self.config.prompt_template)
-            .await
-            .map_err(|error| HarnessError::Io(error.to_string()))?;
-
+    fn render_prompt(&self, ctx: &PostContext) -> Result<String, HarnessError> {
         let post_json = serde_json::to_string_pretty(&ctx.post)
-            .map_err(|error| HarnessError::InvalidResponse(error.to_string()))?;
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
         let created_at = ctx
             .post
             .created_at
             .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|error| HarnessError::InvalidResponse(error.to_string()))?;
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
         let wiki_path = ctx.wiki_path.display().to_string();
         let lens_path = ctx.lens.path.display().to_string();
 
@@ -68,7 +70,7 @@ impl SubprocessHarness {
             ("{{CANDIDATE_SLUG}}", ctx.candidate_slug.as_str()),
         ];
 
-        Ok(render_template(&template, &substitutions))
+        Ok(render_template(&self.prompt_template, &substitutions))
     }
 }
 
@@ -103,7 +105,7 @@ fn render_template(template: &str, substitutions: &[(&str, &str)]) -> String {
 #[async_trait]
 impl Harness for SubprocessHarness {
     async fn process_post(&self, ctx: PostContext) -> Result<AgentReturn, HarnessError> {
-        let prompt = self.render_prompt(&ctx).await?;
+        let prompt = self.render_prompt(&ctx)?;
 
         let mut command = Command::new(&self.config.command);
         command
@@ -143,9 +145,12 @@ impl Harness for SubprocessHarness {
         let parsed = parse_raw_agent_return(&stdout);
 
         if !output.status.success() {
+            let parse_error = parsed.as_ref().err().map(ToString::to_string);
             return Err(HarnessError::Exit {
                 status: output.status.to_string(),
                 stderr,
+                stdout_tail: stdout_tail(&stdout),
+                parse_error,
                 raw: parsed.ok().map(Box::new),
             });
         }
@@ -265,6 +270,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn harness_rejects_missing_prompt_template_at_construction() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+
+        let error = SubprocessHarness::new(HarnessConfig {
+            command: "true".to_string(),
+            args: vec![],
+            prompt_template: dir.path().join("missing.md"),
+            timeout_secs: 5,
+        })
+        .expect_err("missing prompt");
+
+        assert!(matches!(error, HarnessError::Io(_)));
+    }
+
     #[tokio::test]
     async fn harness_runs_stub_script_and_parses_final_json_line() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -300,7 +320,8 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
-        });
+        })
+        .expect("harness");
 
         let result = harness
             .process_post(make_context(wiki, dir.path().join("lens.md")))
@@ -340,7 +361,8 @@ sleep 5
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 1,
-        });
+        })
+        .expect("harness");
 
         let error = harness.process_post(ctx).await.expect_err("timeout");
         assert!(matches!(error, HarnessError::Timeout { timeout_secs: 1 }));
@@ -379,7 +401,8 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
-        });
+        })
+        .expect("harness");
 
         let result = harness.process_post(ctx).await.expect("harness result");
 
@@ -416,7 +439,8 @@ exit 7
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
-        });
+        })
+        .expect("harness");
 
         let error = harness
             .process_post(make_context(wiki, dir.path().join("lens.md")))
@@ -429,6 +453,63 @@ exit 7
                 let raw = raw.expect("contract JSON");
                 assert_eq!(raw.stance.as_deref(), Some("decline"));
                 assert_eq!(raw.raw_path.as_deref(), Some("raw/news/item.md"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_exit_preserves_parse_error_when_contract_json_is_missing() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = dir.path().join("wiki");
+        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("failing-no-contract.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+echo "diagnostic line"
+echo '{"trace_id":"abc"}'
+echo "cleanup failed" >&2
+exit 7
+"#,
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+        })
+        .expect("harness");
+
+        let error = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect_err("non-zero exit");
+
+        match error {
+            HarnessError::Exit {
+                parse_error,
+                stdout_tail,
+                raw,
+                ..
+            } => {
+                assert!(raw.is_none());
+                assert!(stdout_tail.contains("diagnostic line"));
+                assert!(
+                    parse_error
+                        .as_deref()
+                        .is_some_and(|message| message.contains("stance field"))
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }

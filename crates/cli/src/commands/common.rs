@@ -26,13 +26,14 @@ pub fn load_configured_lens(config: &AppConfig) -> Result<Lens> {
     Ok(lens)
 }
 
-pub fn build_harness(config: &AppConfig) -> SubprocessHarness {
+pub fn build_harness(config: &AppConfig) -> Result<SubprocessHarness> {
     SubprocessHarness::new(AdapterHarnessConfig {
         command: config.harness.command.clone(),
         args: config.harness.args.clone(),
         prompt_template: config.harness.prompt_template.clone(),
         timeout_secs: config.harness.timeout_secs,
     })
+    .context("Failed to initialize harness")
 }
 
 pub fn build_post_source(config: &AppConfig) -> Result<Arc<dyn PostSource>> {

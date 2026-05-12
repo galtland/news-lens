@@ -197,46 +197,50 @@ impl NostrPublisher {
             .await
             .map_err(|e| PublishError::Api(format!("Failed to send event to relay: {}", e)))?;
 
-        let mut last_notice = None;
+        timeout(RELAY_ACK_TIMEOUT, async {
+            let mut last_notice = None;
 
-        loop {
-            let message = timeout(RELAY_ACK_TIMEOUT, socket.next())
-                .await
-                .map_err(|_| PublishError::Api("Timed out waiting for relay OK".to_string()))?
-                .ok_or_else(|| {
-                    PublishError::Api(
-                        last_notice
-                            .clone()
-                            .unwrap_or_else(|| "Relay closed before OK".to_string()),
-                    )
-                })?
-                .map_err(|e| PublishError::Api(format!("Relay websocket error: {}", e)))?;
-
-            match message {
-                Message::Text(text) => {
-                    match handle_relay_text(&text, &event.id, &mut last_notice)? {
-                        RelayAck::Accepted => return Ok(()),
-                        RelayAck::Rejected(message) => {
-                            return Err(PublishError::Api(format!(
-                                "Relay rejected event: {}",
-                                message
-                            )));
-                        }
-                        RelayAck::Wait => {}
-                    }
-                }
-                Message::Ping(payload) => socket
-                    .send(Message::Pong(payload))
+            loop {
+                let message = socket
+                    .next()
                     .await
-                    .map_err(|e| PublishError::Api(format!("Failed to pong relay: {}", e)))?,
-                Message::Close(_) => {
-                    return Err(PublishError::Api(
-                        last_notice.unwrap_or_else(|| "Relay closed before OK".to_string()),
-                    ));
+                    .ok_or_else(|| {
+                        PublishError::Api(
+                            last_notice
+                                .clone()
+                                .unwrap_or_else(|| "Relay closed before OK".to_string()),
+                        )
+                    })?
+                    .map_err(|e| PublishError::Api(format!("Relay websocket error: {}", e)))?;
+
+                match message {
+                    Message::Text(text) => {
+                        match handle_relay_text(&text, &event.id, &mut last_notice)? {
+                            RelayAck::Accepted => return Ok(()),
+                            RelayAck::Rejected(message) => {
+                                return Err(PublishError::Api(format!(
+                                    "Relay rejected event: {}",
+                                    message
+                                )));
+                            }
+                            RelayAck::Wait => {}
+                        }
+                    }
+                    Message::Ping(payload) => socket
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|e| PublishError::Api(format!("Failed to pong relay: {}", e)))?,
+                    Message::Close(_) => {
+                        return Err(PublishError::Api(
+                            last_notice.unwrap_or_else(|| "Relay closed before OK".to_string()),
+                        ));
+                    }
+                    Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
                 }
-                Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
             }
-        }
+        })
+        .await
+        .map_err(|_| PublishError::Api("Timed out waiting for relay OK".to_string()))?
     }
 }
 
