@@ -4,9 +4,12 @@ use async_trait::async_trait;
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use crate::model::{
-    AccountState, AgentReturn, PostContext, ProcessedPostRecord, RawAgentReturn, RenderedPost,
-    SourcePost,
+use crate::{
+    compare_post_ids,
+    model::{
+        AccountState, AgentReturn, PostContext, ProcessedPostRecord, RawAgentReturn, RenderedPost,
+        SourcePost,
+    },
 };
 
 /// Error type for post source operations.
@@ -22,6 +25,29 @@ pub enum PostSourceError {
     Network(String),
 }
 
+/// Posts fetched from a source together with the cursor to persist after processing.
+#[derive(Debug, Clone)]
+pub struct PostFetchBatch {
+    pub posts: Vec<SourcePost>,
+    pub next_since_id: Option<String>,
+}
+
+impl PostFetchBatch {
+    pub fn complete(posts: Vec<SourcePost>, current_since_id: Option<&str>) -> Self {
+        let next_since_id = posts
+            .iter()
+            .map(|post| post.id.as_str())
+            .max_by(|a, b| compare_post_ids(a, b))
+            .map(str::to_string)
+            .or_else(|| current_since_id.map(str::to_string));
+
+        Self {
+            posts,
+            next_since_id,
+        }
+    }
+}
+
 /// Port for fetching posts from a source platform.
 #[async_trait]
 pub trait PostSource: Send + Sync {
@@ -31,6 +57,16 @@ pub trait PostSource: Send + Sync {
         account: &str,
         since_id: Option<&str>,
     ) -> Result<Vec<SourcePost>, PostSourceError>;
+
+    /// Fetch posts and return the source cursor that should be persisted.
+    async fn fetch_posts_batch(
+        &self,
+        account: &str,
+        since_id: Option<&str>,
+    ) -> Result<PostFetchBatch, PostSourceError> {
+        let posts = self.fetch_posts(account, since_id).await?;
+        Ok(PostFetchBatch::complete(posts, since_id))
+    }
 
     /// Fetch a specific source post by platform ID when the adapter supports it.
     ///

@@ -1,16 +1,17 @@
 //! X API read adapter for fetching posts
 
 use async_trait::async_trait;
-use news_lens_domain::{PostSource, PostSourceError, SourcePost, compare_post_ids};
+use news_lens_domain::{PostFetchBatch, PostSource, PostSourceError, SourcePost, compare_post_ids};
 use reqwest::{Client, Response};
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use time::OffsetDateTime;
 
 const DEFAULT_TIMELINE_PAGE_CAP: usize = 5;
 const MAX_TIMELINE_PAGE_CAP: usize = 10;
+const TIMELINE_CURSOR_PREFIX: &str = "news-lens:x-backfill:";
 
 /// X API post source for reading user timelines
 pub struct XPostSource {
@@ -80,25 +81,31 @@ impl XPostSource {
         &self,
         user_id: &str,
         username: &str,
-        since_id: Option<&str>,
-    ) -> Result<Vec<SourcePost>, PostSourceError> {
+        cursor: &TimelineCursor,
+    ) -> Result<TimelineFetch, PostSourceError> {
         let mut posts = Vec::new();
-        let mut pagination_token = None;
+        let mut pagination_token = cursor.pagination_token.clone();
+        let mut high_watermark = cursor.high_watermark.clone();
         let mut pages_fetched = 0usize;
 
         loop {
             let tweets_response = self
-                .fetch_user_tweets_page(user_id, since_id, pagination_token.as_deref())
+                .fetch_user_tweets_page(
+                    user_id,
+                    cursor.since_id.as_deref(),
+                    pagination_token.as_deref(),
+                )
                 .await?;
             pages_fetched += 1;
 
-            posts.extend(
-                tweets_response
-                    .data
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|tweet| source_post_from_tweet(tweet, Some(username))),
-            );
+            let page_posts = tweets_response
+                .data
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tweet| source_post_from_tweet(tweet, Some(username)))
+                .collect::<Vec<_>>();
+            high_watermark = max_post_id(high_watermark, &page_posts);
+            posts.extend(page_posts);
 
             let next_token = tweets_response
                 .meta
@@ -108,19 +115,31 @@ impl XPostSource {
                 break;
             };
             if pages_fetched >= self.timeline_page_cap {
+                let next_since_id = TimelineCursor {
+                    since_id: cursor.since_id.clone(),
+                    pagination_token: Some(next_token),
+                    high_watermark,
+                }
+                .encode()?;
                 tracing::info!(
                     account = %username,
                     pages_fetched,
                     page_cap = self.timeline_page_cap,
-                    "X tweet pagination cap reached; since_id will catch up on subsequent runs"
+                    "X tweet pagination cap reached; stored cursor will resume before since_id catches up"
                 );
-                break;
+                return Ok(TimelineFetch {
+                    posts,
+                    next_since_id: Some(next_since_id),
+                });
             }
 
             pagination_token = Some(next_token);
         }
 
-        Ok(posts)
+        Ok(TimelineFetch {
+            posts,
+            next_since_id: high_watermark.or_else(|| cursor.since_id.clone()),
+        })
     }
 
     async fn fetch_user_tweets_page(
@@ -248,6 +267,50 @@ struct TweetsMeta {
     next_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TimelineCursor {
+    since_id: Option<String>,
+    pagination_token: Option<String>,
+    high_watermark: Option<String>,
+}
+
+struct TimelineFetch {
+    posts: Vec<SourcePost>,
+    next_since_id: Option<String>,
+}
+
+impl TimelineCursor {
+    fn from_state(value: Option<&str>) -> Result<Self, PostSourceError> {
+        let Some(value) = value else {
+            return Ok(Self {
+                since_id: None,
+                pagination_token: None,
+                high_watermark: None,
+            });
+        };
+
+        if let Some(json) = value.strip_prefix(TIMELINE_CURSOR_PREFIX) {
+            return serde_json::from_str(json).map_err(|error| {
+                PostSourceError::Api(format!("Invalid X pagination cursor: {}", error))
+            });
+        }
+
+        Ok(Self {
+            since_id: Some(value.to_string()),
+            pagination_token: None,
+            high_watermark: None,
+        })
+    }
+
+    fn encode(&self) -> Result<String, PostSourceError> {
+        serde_json::to_string(self)
+            .map(|json| format!("{}{}", TIMELINE_CURSOR_PREFIX, json))
+            .map_err(|error| {
+                PostSourceError::Api(format!("Failed to encode X pagination cursor: {}", error))
+            })
+    }
+}
+
 #[derive(Deserialize)]
 struct TweetResponse {
     data: Option<Tweet>,
@@ -290,6 +353,19 @@ fn username_for_author<'a>(
         .iter()
         .find(|user| user.id == author_id)
         .map(|user| user.username.as_str())
+}
+
+fn max_post_id(mut current: Option<String>, posts: &[SourcePost]) -> Option<String> {
+    for post in posts {
+        let should_replace = match current.as_deref() {
+            Some(current) => compare_post_ids(current, &post.id).is_lt(),
+            None => true,
+        };
+        if should_replace {
+            current = Some(post.id.clone());
+        }
+    }
+    current
 }
 
 async fn parse_x_response<T: DeserializeOwned>(
@@ -379,20 +455,34 @@ impl PostSource for XPostSource {
         account: &str,
         since_id: Option<&str>,
     ) -> Result<Vec<SourcePost>, PostSourceError> {
-        tracing::info!(account = %account, since_id = ?since_id, "Fetching posts from X");
+        Ok(self.fetch_posts_batch(account, since_id).await?.posts)
+    }
 
+    async fn fetch_posts_batch(
+        &self,
+        account: &str,
+        since_id: Option<&str>,
+    ) -> Result<PostFetchBatch, PostSourceError> {
+        let cursor = TimelineCursor::from_state(since_id)?;
+        tracing::info!(account = %account, since_id = ?cursor.since_id, "Fetching posts from X");
         // Get user ID from username
         let user_id = self.get_user_id(account).await?;
 
         // Fetch tweets
-        let mut posts = self.fetch_user_tweets(&user_id, account, since_id).await?;
+        let TimelineFetch {
+            mut posts,
+            next_since_id,
+        } = self.fetch_user_tweets(&user_id, account, &cursor).await?;
 
         // Sort by ID (which is chronological) ascending
         posts.sort_by(|a, b| compare_post_ids(&a.id, &b.id));
 
         tracing::info!(account = %account, count = posts.len(), "Fetched posts");
 
-        Ok(posts)
+        Ok(PostFetchBatch {
+            posts,
+            next_since_id,
+        })
     }
 
     async fn fetch_post_by_id(&self, post_id: &str) -> Result<Option<SourcePost>, PostSourceError> {
@@ -524,6 +614,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_posts_resumes_capped_pagination_cursor() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/by/username/testuser"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "123456789"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param_is_missing("pagination_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "300",
+                        "text": "First page",
+                        "created_at": "2024-01-15T14:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-2"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "200",
+                        "text": "Second page",
+                        "created_at": "2024-01-15T13:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-3"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "100",
+                        "text": "Third page",
+                        "created_at": "2024-01-15T12:00:00Z"
+                    }
+                ],
+                "meta": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let source = XPostSource::with_base_url_and_page_cap(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            2,
+        );
+
+        let first = source.fetch_posts_batch("testuser", None).await.unwrap();
+        let cursor = first.next_since_id.expect("pagination cursor");
+
+        assert_eq!(
+            first
+                .posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["200", "300"]
+        );
+
+        let resumed = source
+            .fetch_posts_batch("testuser", Some(cursor.as_str()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resumed
+                .posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["100"]
+        );
+        assert_eq!(resumed.next_since_id.as_deref(), Some("300"));
+    }
+
+    #[tokio::test]
     async fn test_fetch_posts_stops_at_page_cap() {
         let mock_server = MockServer::start().await;
 
@@ -580,14 +771,21 @@ mod tests {
             2,
         );
 
-        let posts = source.fetch_posts("testuser", None).await.unwrap();
+        let batch = source.fetch_posts_batch("testuser", None).await.unwrap();
 
         assert_eq!(
-            posts
+            batch
+                .posts
                 .iter()
                 .map(|post| post.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["tweet1", "tweet2"]
+        );
+        assert!(
+            batch
+                .next_since_id
+                .as_deref()
+                .is_some_and(|cursor| cursor.starts_with(TIMELINE_CURSOR_PREFIX))
         );
     }
 

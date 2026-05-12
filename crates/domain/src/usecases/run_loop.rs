@@ -5,7 +5,6 @@ use std::sync::Arc;
 use regex::Regex;
 
 use crate::{
-    compare_post_ids,
     model::{
         AccountState, AgentReturn, Lens, PostContext, ProcessResult, ProcessedPostRecord,
         RawAgentReturn, RenderedPost, SourcePost, Stance, normalize_existing_wiki_file,
@@ -152,18 +151,14 @@ where
 
         tracing::info!(account = %account, since_id = ?since_id, "Fetching posts");
 
-        let posts = self
+        let fetched = self
             .post_source
-            .fetch_posts(account, since_id)
+            .fetch_posts_batch(account, since_id)
             .await
             .map_err(|error| RunLoopError::PostSource(error.to_string()))?;
 
-        let last_fetched_id = posts
-            .iter()
-            .map(|post| post.id.as_str())
-            .max_by(|a, b| compare_post_ids(a, b))
-            .map(str::to_string);
-        let filtered_posts = self.filter_posts(posts);
+        let next_since_id = fetched.next_since_id;
+        let filtered_posts = self.filter_posts(fetched.posts);
         let mut results = Vec::new();
 
         for post in filtered_posts {
@@ -172,7 +167,7 @@ where
             results.push((post_id, result));
         }
 
-        if let Some(last_id) = last_fetched_id.or_else(|| since_id.map(String::from)) {
+        if let Some(last_id) = next_since_id {
             let new_state = AccountState {
                 account: account_key,
                 since_id: Some(last_id),
@@ -471,7 +466,7 @@ pub fn candidate_slug(post: &SourcePost) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::{PostSourceError, PublishError, PublishResult};
+    use crate::ports::{PostFetchBatch, PostSourceError, PublishError, PublishResult};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
@@ -525,6 +520,30 @@ mod tests {
                 .unwrap()
                 .push(since_id.map(str::to_string));
             Ok(vec![sample_post("2")])
+        }
+    }
+
+    struct CursorPostSource;
+
+    #[async_trait]
+    impl PostSource for CursorPostSource {
+        async fn fetch_posts(
+            &self,
+            _account: &str,
+            _since_id: Option<&str>,
+        ) -> Result<Vec<SourcePost>, PostSourceError> {
+            Ok(vec![])
+        }
+
+        async fn fetch_posts_batch(
+            &self,
+            _account: &str,
+            _since_id: Option<&str>,
+        ) -> Result<PostFetchBatch, PostSourceError> {
+            Ok(PostFetchBatch {
+                posts: vec![sample_post("2")],
+                next_since_id: Some("opaque-source-cursor".to_string()),
+            })
         }
     }
 
@@ -923,6 +942,45 @@ mod tests {
             .expect("state")
             .expect("account state");
         assert_eq!(account.since_id.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn poll_once_persists_source_cursor_instead_of_deriving_max_post_id() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(CursorPostSource),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["tester".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        run_loop.poll_once().await.expect("poll");
+
+        let account = state
+            .get_account_state(&cursor_account_key("test-lens", "tester"))
+            .await
+            .expect("state")
+            .expect("account state");
+        assert_eq!(account.since_id.as_deref(), Some("opaque-source-cursor"));
     }
 
     #[tokio::test]
