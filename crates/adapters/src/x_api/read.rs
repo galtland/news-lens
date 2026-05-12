@@ -800,6 +800,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_posts_resumes_capped_pagination_cursor() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/by/username/testuser"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "123456789"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param_is_missing("pagination_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "300",
+                        "text": "First page",
+                        "created_at": "2024-01-15T14:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-2"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "200",
+                        "text": "Second page",
+                        "created_at": "2024-01-15T13:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-3"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "100",
+                        "text": "Third page",
+                        "created_at": "2024-01-15T12:00:00Z"
+                    }
+                ],
+                "meta": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let source = XPostSource::with_base_url_and_page_cap(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            2,
+        );
+
+        let first = source.fetch_posts_batch("testuser", None).await.unwrap();
+        let cursor = first.next_since_id.expect("pagination cursor");
+
+        assert_eq!(
+            first
+                .posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["200", "300"]
+        );
+
+        let resumed = source
+            .fetch_posts_batch("testuser", Some(cursor.as_str()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resumed
+                .posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["100"]
+        );
+        assert_eq!(resumed.next_since_id.as_deref(), Some("300"));
+    }
+
+    #[tokio::test]
     async fn test_fetch_post_by_id_success() {
         let mock_server = MockServer::start().await;
 
