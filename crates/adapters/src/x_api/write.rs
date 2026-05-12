@@ -95,7 +95,7 @@ impl Publisher for XPublisher {
         }
 
         let text = match self.mode {
-            XPublishMode::NewPost => text_with_source_link(post, self.max_chars),
+            XPublishMode::NewPost => format_new_post_text(post, self.max_chars),
             XPublishMode::Reply | XPublishMode::Quote => post.text.clone(),
         };
 
@@ -181,7 +181,7 @@ impl Publisher for XPublisher {
     }
 }
 
-fn text_with_source_link(post: &RenderedPost, max_chars: usize) -> String {
+pub(crate) fn format_new_post_text(post: &RenderedPost, max_chars: usize) -> String {
     let source_url = post.source_post_url.trim();
     if source_url.is_empty() {
         post.text.clone()
@@ -356,7 +356,7 @@ mod tests {
             source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
         };
 
-        let text = text_with_source_link(&post, 64);
+        let text = format_new_post_text(&post, 64);
 
         assert!(text.len() <= 64);
         assert!(text.ends_with("https://x.com/user/status/original_tweet_id"));

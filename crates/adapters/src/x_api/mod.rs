@@ -5,6 +5,7 @@ mod write;
 
 pub use read::XPostSource;
 pub use write::XPublisher;
+pub(crate) use write::format_new_post_text;
 
 use async_trait::async_trait;
 use news_lens_domain::{

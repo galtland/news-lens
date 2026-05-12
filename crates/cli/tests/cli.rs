@@ -174,6 +174,52 @@ fn process_jsonl_require_approval_writes_outbox_and_state() {
 }
 
 #[test]
+fn process_jsonl_require_approval_new_post_outbox_includes_source_link() {
+    let dir = TempDir::new().expect("temp dir");
+    let config_path = dir.path().join("config.toml");
+    let state_path = dir.path().join("state.sqlite");
+    let outbox_path = dir.path().join("outbox.jsonl");
+    let config = fixture_config_with_state(&state_path)
+        .replace("[x.write]\nenabled = false", "[x.write]\nenabled = true")
+        .replace("mode = \"reply\"", "mode = \"new_post\"");
+    fs::write(&config_path, config).expect("write config");
+
+    let mut cmd = cargo_bin_cmd!("news-lens");
+    cmd.current_dir(workspace_root())
+        .args([
+            "process",
+            "--jsonl",
+            "fixtures/posts/source_posts.jsonl",
+            "--require-approval",
+            "--outbox",
+        ])
+        .arg(&outbox_path)
+        .arg("--config")
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    let outbox = fs::read_to_string(&outbox_path).expect("read outbox");
+    let value: Value = serde_json::from_str(outbox.trim()).expect("valid outbox json");
+    assert_eq!(
+        value["text"],
+        "A concise fixture line grounded in the wiki.\n\nhttps://example.com/fixture-1"
+    );
+}
+
+#[test]
+fn run_outbox_requires_approval_mode() {
+    let dir = TempDir::new().expect("temp dir");
+    let outbox_path = dir.path().join("outbox.jsonl");
+
+    let mut cmd = cargo_bin_cmd!("news-lens");
+    cmd.args(["run", "--once", "--outbox"])
+        .arg(&outbox_path)
+        .assert()
+        .failure();
+}
+
+#[test]
 fn run_once_with_no_accounts_does_not_require_x_token() {
     let dir = TempDir::new().expect("temp dir");
     let config_path = dir.path().join("config.toml");

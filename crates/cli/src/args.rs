@@ -56,7 +56,7 @@ pub struct RunArgs {
     pub require_approval: bool,
 
     /// Path to outbox file (used with --require-approval).
-    #[arg(long)]
+    #[arg(long, requires = "require_approval")]
     pub outbox: Option<PathBuf>,
 }
 

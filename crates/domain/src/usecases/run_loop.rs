@@ -119,8 +119,16 @@ where
         let mut results = Vec::new();
 
         for account in &self.config.accounts {
-            let account_results = self.poll_account(account).await?;
-            results.extend(account_results);
+            match self.poll_account(account).await {
+                Ok(account_results) => results.extend(account_results),
+                Err(error) => {
+                    tracing::error!(
+                        account = %account,
+                        error = %error,
+                        "Failed to poll account; continuing with remaining accounts"
+                    );
+                }
+            }
         }
 
         Ok(results)
@@ -287,14 +295,26 @@ where
         }
 
         if should_publish || !publish_errors.is_empty() {
-            self.record_agent_return(
-                post,
-                &agent_return,
-                x_post_id.clone(),
-                nostr_event_id.clone(),
-            )
-            .await
-            .map_err(state_error)?;
+            if let Err(error) = self
+                .record_agent_return(
+                    post,
+                    &agent_return,
+                    x_post_id.clone(),
+                    nostr_event_id.clone(),
+                )
+                .await
+            {
+                tracing::error!(
+                    post_id = %post.id,
+                    x_post_id = ?x_post_id,
+                    nostr_event_id = ?nostr_event_id,
+                    raw_path = %agent_return.raw_path,
+                    thesis_slug = ?agent_return.thesis_slug,
+                    error = %error,
+                    "Failed to record publish result after publishing"
+                );
+                return Err(state_error(error));
+            }
         } else {
             self.record_agent_return(post, &agent_return, None, None)
                 .await
@@ -465,12 +485,7 @@ fn render_reply(post: &SourcePost, agent_return: &AgentReturn) -> RenderedPost {
 }
 
 pub fn candidate_slug(post: &SourcePost) -> String {
-    let date = post
-        .created_at
-        .date()
-        .to_string()
-        .replace('[', "")
-        .replace(']', "");
+    let date = post.created_at.date().to_string();
     let mut slug = String::new();
     let mut last_was_dash = false;
 
@@ -522,6 +537,23 @@ mod tests {
         }
     }
 
+    struct PerAccountPostSource;
+
+    #[async_trait]
+    impl PostSource for PerAccountPostSource {
+        async fn fetch_posts(
+            &self,
+            account: &str,
+            _since_id: Option<&str>,
+        ) -> Result<Vec<SourcePost>, PostSourceError> {
+            if account == "bad" {
+                Err(PostSourceError::Api("temporary failure".to_string()))
+            } else {
+                Ok(vec![sample_post("1")])
+            }
+        }
+    }
+
     struct FakeHarness {
         result: AgentReturn,
     }
@@ -565,6 +597,8 @@ mod tests {
         accounts: StdMutex<HashMap<String, AccountState>>,
         processed: StdMutex<HashMap<String, ProcessedPostRecord>>,
         fail_is_processed: bool,
+        record_calls: StdMutex<usize>,
+        fail_record_call: Option<usize>,
         record_failures_remaining: StdMutex<usize>,
     }
 
@@ -574,6 +608,8 @@ mod tests {
                 accounts: StdMutex::new(HashMap::new()),
                 processed: StdMutex::new(HashMap::new()),
                 fail_is_processed: false,
+                record_calls: StdMutex::new(0),
+                fail_record_call: None,
                 record_failures_remaining: StdMutex::new(0),
             }
         }
@@ -588,6 +624,13 @@ mod tests {
         fn with_record_failures(count: usize) -> Self {
             Self {
                 record_failures_remaining: StdMutex::new(count),
+                ..Self::new()
+            }
+        }
+
+        fn with_record_failure_on_call(call: usize) -> Self {
+            Self {
+                fail_record_call: Some(call),
                 ..Self::new()
             }
         }
@@ -618,6 +661,13 @@ mod tests {
         }
 
         async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
+            let mut calls = self.record_calls.lock().unwrap();
+            *calls += 1;
+            if self.fail_record_call == Some(*calls) {
+                return Err(StateError::Database("record_processed failed".to_string()));
+            }
+            drop(calls);
+
             let mut failures = self.record_failures_remaining.lock().unwrap();
             if *failures > 0 {
                 *failures -= 1;
@@ -766,6 +816,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_once_continues_after_one_account_fails() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(PerAccountPostSource),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["bad".to_string(), "good".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop.poll_once().await.expect("poll");
+
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
+        assert!(state.get_processed("1").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn publisher_failure_records_processed_stance_without_retrying() {
         let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
@@ -891,6 +977,48 @@ mod tests {
             matches!(error, RunLoopError::State(message) if message.contains("record_processed"))
         );
         assert!(x.published.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_state_write_error_preserves_publish_result_in_error_log_branch() {
+        let state = Arc::new(FakeStateStore::with_record_failure_on_call(2));
+        let x = Arc::new(FakePublisher {
+            enabled: true,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x.clone(),
+            nostr,
+            state,
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                dry_run: false,
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let error = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect_err("state error");
+
+        assert!(
+            matches!(error, RunLoopError::State(message) if message.contains("record_processed"))
+        );
+        assert_eq!(x.published.lock().unwrap().len(), 1);
     }
 
     #[test]

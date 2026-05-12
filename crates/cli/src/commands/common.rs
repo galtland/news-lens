@@ -67,7 +67,11 @@ pub async fn build_publishers(
         tracing::info!(outbox = %outbox_path.display(), "Writing approvals to outbox");
 
         let x_publisher: Arc<dyn Publisher> = if config.x.write.enabled {
-            Arc::new(OutboxPublisher::new(writer.clone(), "x"))
+            Arc::new(OutboxPublisher::new_x(
+                writer.clone(),
+                x_mode,
+                config.x.write.max_chars,
+            ))
         } else {
             Arc::new(XPublisher::disabled())
         };

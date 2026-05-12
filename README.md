@@ -19,7 +19,7 @@ news-lens run --dry-run --once
 
 ```bash
 news-lens process --post --text "Post content"
-news-lens process --jsonl fixtures/posts/sample_x_post.jsonl
+news-lens process --jsonl fixtures/posts/source_posts.jsonl
 news-lens run --dry-run --once
 news-lens run --require-approval --once
 news-lens wiki status

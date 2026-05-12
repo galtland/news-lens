@@ -1,7 +1,8 @@
 //! Outbox publisher for require-approval mode.
 
+use crate::x_api::format_new_post_text;
 use async_trait::async_trait;
-use news_lens_domain::model::RenderedPost;
+use news_lens_domain::model::{RenderedPost, XPublishMode};
 use news_lens_domain::ports::{PublishError, PublishResult, Publisher};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -63,12 +64,36 @@ impl OutboxWriter {
 pub struct OutboxPublisher {
     writer: OutboxWriter,
     platform: &'static str,
+    text_mode: OutboxTextMode,
 }
 
 impl OutboxPublisher {
     pub fn new(writer: OutboxWriter, platform: &'static str) -> Self {
-        Self { writer, platform }
+        Self {
+            writer,
+            platform,
+            text_mode: OutboxTextMode::Plain,
+        }
     }
+
+    pub fn new_x(writer: OutboxWriter, mode: XPublishMode, max_chars: usize) -> Self {
+        let text_mode = match mode {
+            XPublishMode::NewPost => OutboxTextMode::XNewPost { max_chars },
+            XPublishMode::Reply | XPublishMode::Quote => OutboxTextMode::Plain,
+        };
+
+        Self {
+            writer,
+            platform: "x",
+            text_mode,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OutboxTextMode {
+    Plain,
+    XNewPost { max_chars: usize },
 }
 
 #[derive(Serialize)]
@@ -82,11 +107,15 @@ struct OutboxEntry<'a> {
 #[async_trait]
 impl Publisher for OutboxPublisher {
     async fn publish(&self, post: &RenderedPost) -> Result<PublishResult, PublishError> {
+        let text = match self.text_mode {
+            OutboxTextMode::Plain => post.text.clone(),
+            OutboxTextMode::XNewPost { max_chars } => format_new_post_text(post, max_chars),
+        };
         let entry = OutboxEntry {
             platform: self.platform,
             source_post_id: &post.source_post_id,
             source_post_url: &post.source_post_url,
-            text: &post.text,
+            text: &text,
         };
 
         self.writer
@@ -140,5 +169,30 @@ mod tests {
         assert_eq!(value["source_post_id"], "123");
         assert_eq!(value["source_post_url"], "https://x.com/example/status/123");
         assert_eq!(value["text"], "Rendered content");
+    }
+
+    #[tokio::test]
+    async fn x_new_post_outbox_entry_includes_source_link() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("outbox.jsonl");
+
+        let writer = OutboxWriter::new(path.clone()).await.expect("writer");
+        let publisher = OutboxPublisher::new_x(writer, XPublishMode::NewPost, 280);
+
+        let post = RenderedPost {
+            text: "Rendered content".to_string(),
+            source_post_id: "123".to_string(),
+            source_post_url: "https://x.com/example/status/123".to_string(),
+        };
+
+        publisher.publish(&post).await.expect("publish");
+
+        let contents = tokio::fs::read_to_string(&path).await.expect("read outbox");
+        let value: Value = serde_json::from_str(contents.trim()).expect("valid json");
+
+        assert_eq!(
+            value["text"],
+            "Rendered content\n\nhttps://x.com/example/status/123"
+        );
     }
 }
