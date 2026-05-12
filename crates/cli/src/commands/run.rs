@@ -17,6 +17,8 @@ use crate::commands::common::{
 };
 use crate::config::AppConfig;
 
+const RUN_ONCE_ALL_FAILED_EXIT_CODE: i32 = 2;
+
 pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> {
     let config = AppConfig::load(config_path.as_deref())?;
 
@@ -67,6 +69,15 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     if args.once {
         let results = run_loop.poll_once().await?;
         log_results(&results);
+        if let Some(exit_code) = run_once_failure_exit_code(&results) {
+            tracing::error!(
+                posts = results.len(),
+                exit_code,
+                "all {} posts failed; exiting 2",
+                results.len()
+            );
+            std::process::exit(exit_code);
+        }
         return Ok(());
     }
 
@@ -133,5 +144,58 @@ fn log_results(results: &[(String, ProcessResult)]) {
                 tracing::error!(post_id = %post_id, error = %error, "Failed");
             }
         }
+    }
+}
+
+fn run_once_failure_exit_code(results: &[(String, ProcessResult)]) -> Option<i32> {
+    (!results.is_empty()
+        && results
+            .iter()
+            .all(|(_, result)| matches!(result, ProcessResult::Failed { .. })))
+    .then_some(RUN_ONCE_ALL_FAILED_EXIT_CODE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(status: ProcessResult) -> (String, ProcessResult) {
+        ("post-1".to_string(), status)
+    }
+
+    #[test]
+    fn run_once_empty_results_exit_success() {
+        assert_eq!(run_once_failure_exit_code(&[]), None);
+    }
+
+    #[test]
+    fn run_once_mixed_results_exit_success() {
+        let results = vec![
+            result(ProcessResult::Failed {
+                error: "harness failed".to_string(),
+            }),
+            result(ProcessResult::Skipped {
+                reason: "already processed".to_string(),
+            }),
+        ];
+
+        assert_eq!(run_once_failure_exit_code(&results), None);
+    }
+
+    #[test]
+    fn run_once_all_failed_results_exit_2() {
+        let results = vec![
+            result(ProcessResult::Failed {
+                error: "harness failed".to_string(),
+            }),
+            result(ProcessResult::Failed {
+                error: "publish failed".to_string(),
+            }),
+        ];
+
+        assert_eq!(
+            run_once_failure_exit_code(&results),
+            Some(RUN_ONCE_ALL_FAILED_EXIT_CODE)
+        );
     }
 }
