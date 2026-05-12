@@ -22,23 +22,35 @@ Full post JSON:
 {{POST_JSON}}
 
 Task:
-1. File the news verbatim as raw/news/YYYY-MM-DD-<slug>.md using /wiki:ingest.
-   Use frontmatter: type=news, source=<url>, captured_at, author, platform.
+1. File the news verbatim as raw/news/<slug>.md using /wiki:ingest. The slug
+   defaults to {{CANDIDATE_SLUG}}; pick a different slug only if that one
+   would collide with an existing file. Use frontmatter:
+   type=news, source=<url>, captured_at, author, platform.
 2. Read the lens. Decide if this post is worth commenting on per the lens
-   stances (Endorse | Critique | Contextualize | Decline). Return the JSON
-   stance value in lowercase: endorse, critique, contextualize, decline, or failed.
-   Be strict; prefer Decline when the wiki has nothing substantive to add.
-3. If not Decline:
+   stances. Return the JSON stance value in lowercase: endorse, critique,
+   contextualize, or decline. Be strict — prefer decline when the wiki
+   has nothing substantive to add. Do not return "failed"; that value is
+   reserved for news-lens-side errors. If you genuinely cannot complete
+   the task, return decline.
+3. If not decline:
    - Read 5–12 relevant articles from wiki/{concepts,topics,references}/.
-     Do not read wiki/theses/ — avoid feedback loops with prior commentary.
-   - Draft a thesis article (markdown) following the wiki's frontmatter and
-     See Also conventions. Cite slugs with [[wikilinks]]. Quote the news
-     text where you call out a framing.
-   - Write it to wiki/theses/<slug>.md.
-4. Run /wiki:lint --fix to heal indexes, See Also backlinks, log.md.
-5. Print the final line as a single JSON object:
+     Read the article bodies, not just the _index.md summaries. Do not
+     read wiki/theses/ — avoid feedback loops with prior commentary.
+   - Look at wiki/theses/state-as-parasite-thesis.md as the precedent for
+     thesis structure, frontmatter shape, See Also conventions, and
+     citation style.
+   - Draft a thesis article that matches that precedent. Cite related
+     wiki articles using the wiki's dual link style:
+       [[slug|Title]] ([Title](relative-path.md))
+     where relative-path is from wiki/theses/ to the cited article (for
+     example: ../concepts/state-power-and-intervention.md). Quote the
+     news text verbatim where you call out a framing.
+   - Write the thesis to wiki/theses/<slug>.md.
+4. Run /wiki:lint --fix to heal indexes, See Also backlinks, and log.md.
+5. Print the final line of stdout as a single JSON object:
    { "stance": "...", "raw_path": "...", "raw_slug": "...",
      "thesis_path": "...?", "thesis_slug": "...?", "one_liner": "...?" }
+   On decline, omit thesis_path, thesis_slug, and one_liner.
 
 Constraints:
 - Never invent positions the wiki does not hold.
