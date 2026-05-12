@@ -455,7 +455,26 @@ impl PostSource for XPostSource {
         account: &str,
         since_id: Option<&str>,
     ) -> Result<Vec<SourcePost>, PostSourceError> {
-        Ok(self.fetch_posts_batch(account, since_id).await?.posts)
+        let mut posts = Vec::new();
+        let mut next_since_id = since_id.map(str::to_string);
+
+        loop {
+            let batch = self
+                .fetch_posts_batch(account, next_since_id.as_deref())
+                .await?;
+            posts.extend(batch.posts);
+
+            let Some(batch_next_since_id) = batch.next_since_id else {
+                break;
+            };
+            if !batch_next_since_id.starts_with(TIMELINE_CURSOR_PREFIX) {
+                break;
+            }
+            next_since_id = Some(batch_next_since_id);
+        }
+
+        posts.sort_by(|a, b| compare_post_ids(&a.id, &b.id));
+        Ok(posts)
     }
 
     async fn fetch_posts_batch(
@@ -712,6 +731,90 @@ mod tests {
             vec!["100"]
         );
         assert_eq!(resumed.next_since_id.as_deref(), Some("300"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_fetch_posts_fetches_past_page_cap() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/by/username/testuser"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "123456789"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param_is_missing("pagination_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "300",
+                        "text": "First page",
+                        "created_at": "2024-01-15T14:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-2"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "200",
+                        "text": "Second page",
+                        "created_at": "2024-01-15T13:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-3"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "100",
+                        "text": "Third page",
+                        "created_at": "2024-01-15T12:00:00Z"
+                    }
+                ],
+                "meta": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let source = XPostSource::with_base_url_and_page_cap(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            2,
+        );
+
+        let posts = source.fetch_posts("testuser", None).await.unwrap();
+
+        assert_eq!(
+            posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["100", "200", "300"]
+        );
     }
 
     #[tokio::test]
