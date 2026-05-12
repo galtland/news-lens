@@ -84,38 +84,15 @@ impl XPostSource {
         cursor: &TimelineCursor,
     ) -> Result<TimelineFetch, PostSourceError> {
         let mut posts = Vec::new();
-        let mut since_id = cursor.since_id.clone();
+        let since_id = cursor.since_id.clone();
         let mut pagination_token = cursor.pagination_token.clone();
-        let mut high_watermark = cursor.high_watermark.clone();
+        let mut newest_seen_id = cursor.newest_seen_id.clone();
         let mut pages_fetched = 0usize;
 
         loop {
-            let tweets_response = match self
+            let tweets_response = self
                 .fetch_user_tweets_page(user_id, since_id.as_deref(), pagination_token.as_deref())
-                .await
-            {
-                Ok(response) => response,
-                Err(error)
-                    if pages_fetched == 0
-                        && pagination_token.is_some()
-                        && should_recover_stale_pagination_token(&error) =>
-                {
-                    let stale_token = pagination_token.take();
-                    since_id = cursor
-                        .high_watermark
-                        .clone()
-                        .or_else(|| cursor.since_id.clone());
-                    tracing::warn!(
-                        account = %username,
-                        stale_pagination_token = ?stale_token,
-                        fallback_since_id = ?since_id,
-                        "X pagination token was rejected; restarting from since_id"
-                    );
-                    self.fetch_user_tweets_page(user_id, since_id.as_deref(), None)
-                        .await?
-                }
-                Err(error) => return Err(error),
-            };
+                .await?;
             pages_fetched += 1;
 
             let page_posts = tweets_response
@@ -124,7 +101,7 @@ impl XPostSource {
                 .into_iter()
                 .map(|tweet| source_post_from_tweet(tweet, Some(username)))
                 .collect::<Vec<_>>();
-            high_watermark = max_post_id(high_watermark, &page_posts);
+            newest_seen_id = max_post_id(newest_seen_id, &page_posts);
             posts.extend(page_posts);
 
             let next_token = tweets_response
@@ -138,7 +115,7 @@ impl XPostSource {
                 let next_since_id = TimelineCursor {
                     since_id: since_id.clone(),
                     pagination_token: Some(next_token),
-                    high_watermark,
+                    newest_seen_id,
                 }
                 .encode()?;
                 tracing::info!(
@@ -158,7 +135,7 @@ impl XPostSource {
 
         Ok(TimelineFetch {
             posts,
-            next_since_id: high_watermark.or(since_id),
+            next_since_id: newest_seen_id.or(since_id),
         })
     }
 
@@ -315,7 +292,7 @@ struct TweetsMeta {
 struct TimelineCursor {
     since_id: Option<String>,
     pagination_token: Option<String>,
-    high_watermark: Option<String>,
+    newest_seen_id: Option<String>,
 }
 
 struct TimelineFetch {
@@ -329,7 +306,7 @@ impl TimelineCursor {
             return Ok(Self {
                 since_id: None,
                 pagination_token: None,
-                high_watermark: None,
+                newest_seen_id: None,
             });
         };
 
@@ -342,7 +319,7 @@ impl TimelineCursor {
         Ok(Self {
             since_id: Some(value.to_string()),
             pagination_token: None,
-            high_watermark: None,
+            newest_seen_id: None,
         })
     }
 
@@ -410,10 +387,6 @@ fn max_post_id(mut current: Option<String>, posts: &[SourcePost]) -> Option<Stri
         }
     }
     current
-}
-
-fn should_recover_stale_pagination_token(error: &PostSourceError) -> bool {
-    matches!(error, PostSourceError::Api(_))
 }
 
 async fn parse_x_response<T: DeserializeOwned>(
@@ -664,175 +637,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["tweet1", "tweet2"]
         );
-    }
-
-    #[tokio::test]
-    async fn test_fetch_posts_resumes_capped_pagination_cursor() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/by/username/testuser"))
-            .and(header("Authorization", "Bearer test-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": {
-                    "id": "123456789"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/123456789/tweets"))
-            .and(query_param_is_missing("pagination_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [
-                    {
-                        "id": "300",
-                        "text": "First page",
-                        "created_at": "2024-01-15T14:00:00Z"
-                    }
-                ],
-                "meta": {
-                    "next_token": "page-2"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/123456789/tweets"))
-            .and(query_param("pagination_token", "page-2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [
-                    {
-                        "id": "200",
-                        "text": "Second page",
-                        "created_at": "2024-01-15T13:00:00Z"
-                    }
-                ],
-                "meta": {
-                    "next_token": "page-3"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/123456789/tweets"))
-            .and(query_param("pagination_token", "page-3"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [
-                    {
-                        "id": "100",
-                        "text": "Third page",
-                        "created_at": "2024-01-15T12:00:00Z"
-                    }
-                ],
-                "meta": {}
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let source = XPostSource::with_base_url_and_page_cap(
-            SecretString::new("test-token".into()),
-            mock_server.uri(),
-            2,
-        );
-
-        let first = source.fetch_posts_batch("testuser", None).await.unwrap();
-        let cursor = first.next_since_id.expect("pagination cursor");
-
-        assert_eq!(
-            first
-                .posts
-                .iter()
-                .map(|post| post.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["200", "300"]
-        );
-
-        let resumed = source
-            .fetch_posts_batch("testuser", Some(cursor.as_str()))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            resumed
-                .posts
-                .iter()
-                .map(|post| post.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["100"]
-        );
-        assert_eq!(resumed.next_since_id.as_deref(), Some("300"));
-    }
-
-    #[tokio::test]
-    async fn test_fetch_posts_recovers_from_stale_pagination_cursor() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/by/username/testuser"))
-            .and(header("Authorization", "Bearer test-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": {
-                    "id": "123456789"
-                }
-            })))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/123456789/tweets"))
-            .and(query_param("pagination_token", "stale-page"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("invalid pagination token"))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/123456789/tweets"))
-            .and(query_param("since_id", "300"))
-            .and(query_param_is_missing("pagination_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [
-                    {
-                        "id": "400",
-                        "text": "Fresh page",
-                        "created_at": "2024-01-15T15:00:00Z"
-                    }
-                ],
-                "meta": {}
-            })))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        let source =
-            XPostSource::with_base_url(SecretString::new("test-token".into()), mock_server.uri());
-        let cursor = TimelineCursor {
-            since_id: None,
-            pagination_token: Some("stale-page".to_string()),
-            high_watermark: Some("300".to_string()),
-        }
-        .encode()
-        .expect("cursor");
-
-        let batch = source
-            .fetch_posts_batch("testuser", Some(cursor.as_str()))
-            .await
-            .expect("stale cursor recovery");
-
-        assert_eq!(
-            batch
-                .posts
-                .iter()
-                .map(|post| post.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["400"]
-        );
-        assert_eq!(batch.next_since_id.as_deref(), Some("400"));
     }
 
     #[tokio::test]
