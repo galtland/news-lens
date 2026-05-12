@@ -1,0 +1,38 @@
+[general]
+state_db_path = "./target/news-lens-fixture-state.sqlite"
+log_level = "info"
+dry_run = true
+
+[wiki]
+path = "./fixtures/wiki"
+
+[lens]
+path = "./fixtures/lens/austrian-libertarian.md"
+id = "austrian-libertarian"
+
+[harness]
+command = "sh"
+args = ["./fixtures/harness/stub-harness.sh"]
+prompt_template = "./prompts/process-post.md"
+timeout_secs = 5
+
+[watch]
+poll_interval_secs = 300
+accounts = []
+include_replies = false
+include_reposts = false
+ignore_patterns = []
+
+[x.read]
+bearer_token_env = "X_BEARER_TOKEN"
+
+[x.write]
+enabled = false
+mode = "reply"
+oauth2_user_token_env = "X_USER_TOKEN"
+max_chars = 280
+
+[nostr]
+enabled = false
+secret_key_env = "NOSTR_NSEC"
+relays = []
