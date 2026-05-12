@@ -117,17 +117,12 @@ impl Harness for SubprocessHarness {
             .spawn()
             .map_err(|error| HarnessError::Io(error.to_string()))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .map_err(|error| HarnessError::Io(error.to_string()))?;
-        }
-
-        let output = timeout(
-            Duration::from_secs(self.config.timeout_secs),
-            child.wait_with_output(),
-        )
+        let output = timeout(Duration::from_secs(self.config.timeout_secs), async move {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(prompt.as_bytes()).await?;
+            }
+            child.wait_with_output().await
+        })
         .await
         .map_err(|_| HarnessError::Timeout {
             timeout_secs: self.config.timeout_secs,
@@ -238,6 +233,41 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
 
         assert_eq!(result.stance, Stance::Critique);
         assert_eq!(result.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[tokio::test]
+    async fn harness_timeout_covers_stdin_write() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = dir.path().join("wiki");
+        std::fs::create_dir_all(&wiki).expect("wiki dir");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{LENS_CONTENT}}").expect("prompt");
+
+        let script = dir.path().join("sleeping-harness.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+sleep 5
+"#,
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+
+        let mut ctx = make_context(wiki, dir.path().join("lens.md"));
+        ctx.lens.content = "x".repeat(2_000_000);
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 1,
+        });
+
+        let error = harness.process_post(ctx).await.expect_err("timeout");
+        assert!(matches!(error, HarnessError::Timeout { timeout_secs: 1 }));
     }
 
     #[test]

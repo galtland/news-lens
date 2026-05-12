@@ -41,7 +41,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
             .await
             .context("Failed to initialize SQLite state store")?,
     );
-    let post_source = Arc::new(build_post_source(&config)?);
+    let post_source = build_post_source(&config)?;
     let (x_publisher, nostr_publisher) =
         build_publishers(&config, dry_run, args.require_approval, args.outbox).await?;
     let clock = Arc::new(SystemClock);

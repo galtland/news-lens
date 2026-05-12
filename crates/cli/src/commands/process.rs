@@ -3,9 +3,7 @@
 use anyhow::{Context, Result, bail};
 use news_lens_adapters::{
     jsonl::JsonlPostSource,
-    nostr::NostrPublisher,
     state::{InMemoryStateStore, SqliteStateStore},
-    x::StubXPublisher,
 };
 use news_lens_domain::{
     Harness, PostSource, ProcessResult, SourcePost, StateStore, SystemClock,
@@ -17,7 +15,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 use crate::args::ProcessArgs;
-use crate::commands::common::{build_harness, load_configured_lens};
+use crate::commands::common::{build_harness, build_publishers, load_configured_lens};
 use crate::config::AppConfig;
 
 pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -25,23 +23,14 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
     let lens = load_configured_lens(&config)?;
     let harness = build_harness(&config);
 
-    if args.require_approval {
-        tracing::warn!(
-            "--require-approval is accepted for consistency but process does not publish"
-        );
-    }
-
     if let Some(post_arg) = args.post {
         let post = synthetic_post(post_arg, args.text)?;
+        let candidate_slug = candidate_slug(&post);
         let ctx = news_lens_domain::PostContext {
             post,
             wiki_path: config.wiki.path.clone(),
             lens,
-            candidate_slug: String::new(),
-        };
-        let ctx = news_lens_domain::PostContext {
-            candidate_slug: candidate_slug(&ctx.post),
-            ..ctx
+            candidate_slug,
         };
         let output = harness
             .process_post(ctx)
@@ -52,12 +41,18 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
     }
 
     if let Some(path) = args.jsonl {
+        let mut dry_run = args.dry_run || config.general.dry_run;
+        if args.require_approval && dry_run {
+            tracing::info!("--require-approval overrides dry-run");
+            dry_run = false;
+        }
+
         let source = JsonlPostSource::new(vec![path]);
         let posts = source
             .fetch_posts("*", None)
             .await
             .context("Failed to load JSONL posts")?;
-        let state_store: Arc<dyn StateStore> = if args.dry_run {
+        let state_store: Arc<dyn StateStore> = if dry_run {
             Arc::new(InMemoryStateStore::new())
         } else {
             Arc::new(
@@ -66,13 +61,19 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
                     .context("Failed to initialize SQLite state store")?,
             )
         };
-        let disabled_x = Arc::new(StubXPublisher::new(false));
-        let disabled_nostr = Arc::new(NostrPublisher::disabled());
+        let publishing_dry_run = !args.require_approval;
+        let (x_publisher, nostr_publisher) = build_publishers(
+            &config,
+            publishing_dry_run,
+            args.require_approval,
+            args.outbox,
+        )
+        .await?;
         let run_loop = RunLoop::new(
             Arc::new(source),
             Arc::new(harness),
-            disabled_x,
-            disabled_nostr,
+            x_publisher,
+            nostr_publisher,
             state_store,
             Arc::new(SystemClock),
             RunLoopConfig {
@@ -80,7 +81,7 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
                 include_replies: config.watch.include_replies,
                 include_reposts: config.watch.include_reposts,
                 ignore_patterns: config.watch.ignore_patterns.clone(),
-                dry_run: true,
+                dry_run: publishing_dry_run,
                 wiki_path: config.wiki.path.clone(),
                 lens,
                 rate_limit_per_minute: None,

@@ -25,7 +25,7 @@ pub enum Commands {
     /// Fetch new posts, process them with the harness, and optionally publish.
     Run(RunArgs),
 
-    /// Process one synthetic post or a JSONL fixture.
+    /// Process one synthetic post or a JSONL fixture without direct publishing.
     Process(ProcessArgs),
 
     /// Inspect the configured wiki.
@@ -74,13 +74,17 @@ pub struct ProcessArgs {
     #[arg(long, conflicts_with = "post")]
     pub jsonl: Option<PathBuf>,
 
-    /// No publishing. Single-post processing never writes state; JSONL skips state DB writes.
+    /// For JSONL, skip state DB writes and suppress outbox publishing.
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Accepted for flag consistency; process does not publish in phases 1-2.
-    #[arg(long)]
+    /// For JSONL processing, write rendered posts to outbox for review.
+    #[arg(long, requires = "jsonl")]
     pub require_approval: bool,
+
+    /// Path to outbox file (used with --require-approval).
+    #[arg(long, requires = "require_approval")]
+    pub outbox: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

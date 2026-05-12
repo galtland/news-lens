@@ -4,9 +4,9 @@ use news_lens_adapters::{
     lens::load_lens,
     nostr::NostrPublisher,
     outbox::{OutboxPublisher, OutboxWriter},
-    x::{XPostSource, XPublisher},
+    x::{StubPostSource, XPostSource, XPublisher},
 };
-use news_lens_domain::{Lens, Publisher, XPublishMode};
+use news_lens_domain::{Lens, PostSource, Publisher, XPublishMode};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,9 +35,13 @@ pub fn build_harness(config: &AppConfig) -> SubprocessHarness {
     })
 }
 
-pub fn build_post_source(config: &AppConfig) -> Result<XPostSource> {
+pub fn build_post_source(config: &AppConfig) -> Result<Arc<dyn PostSource>> {
+    if config.watch.accounts.is_empty() {
+        return Ok(Arc::new(StubPostSource::empty()));
+    }
+
     let bearer_token = load_api_key(&config.x.read.bearer_token_env, "x_read")?;
-    Ok(XPostSource::new(bearer_token))
+    Ok(Arc::new(XPostSource::new(bearer_token)))
 }
 
 pub async fn build_publishers(
@@ -49,6 +53,13 @@ pub async fn build_publishers(
     let x_mode = parse_x_publish_mode(&config.x.write.mode)?;
 
     if require_approval {
+        if !config.x.write.enabled && !config.nostr.enabled {
+            return Ok((
+                Arc::new(XPublisher::disabled()),
+                Arc::new(NostrPublisher::disabled()),
+            ));
+        }
+
         let outbox_path = outbox_path.unwrap_or_else(default_outbox_path);
         let writer = OutboxWriter::new(outbox_path.clone())
             .await
