@@ -144,6 +144,10 @@ impl RawAgentReturn {
             let thesis_slug = self
                 .thesis_slug
                 .ok_or(AgentValidationError::MissingField("thesis_slug"))?;
+            let thesis_slug = thesis_slug.trim().to_string();
+            if thesis_slug.is_empty() {
+                return Err(AgentValidationError::BlankThesisSlug);
+            }
             let required_one_liner = one_liner
                 .take()
                 .ok_or(AgentValidationError::MissingField("one_liner"))?;
@@ -194,6 +198,8 @@ pub enum AgentValidationError {
     MissingFile { field: &'static str, path: String },
     #[error("one_liner is blank")]
     BlankOneLiner,
+    #[error("thesis_slug is blank")]
+    BlankThesisSlug,
 }
 
 /// Publishing mode for X posts.
@@ -447,6 +453,26 @@ mod tests {
 
         let error = raw.validate(wiki.path()).expect_err("blank one_liner");
         assert_eq!(error, AgentValidationError::BlankOneLiner);
+    }
+
+    #[test]
+    fn validation_rejects_blank_thesis_slug_on_non_decline_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.thesis_slug = Some(" \n\t ".to_string());
+
+        let error = raw.validate(wiki.path()).expect_err("blank thesis_slug");
+        assert_eq!(error, AgentValidationError::BlankThesisSlug);
+    }
+
+    #[test]
+    fn validation_trims_thesis_slug_before_recording() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.thesis_slug = Some("  item \n".to_string());
+
+        let output = raw.validate(wiki.path()).expect("valid thesis_slug");
+        assert_eq!(output.thesis_slug.as_deref(), Some("item"));
     }
 
     #[test]
