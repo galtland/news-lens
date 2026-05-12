@@ -1,5 +1,5 @@
 {
-  description = "news-lens - CLI tool for classifying posts using LLM-powered narrative tagging";
+  description = "news-lens - CLI tool for wiki-grounded news commentary";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

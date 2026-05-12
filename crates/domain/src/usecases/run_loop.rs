@@ -254,15 +254,23 @@ where
             }
         };
 
+        if agent_return.stance == Stance::Failed {
+            self.record_agent_return(post, &agent_return, None, None)
+                .await
+                .map_err(state_error)?;
+            return Ok(ProcessResult::Failed {
+                error: "Agent returned failed stance".to_string(),
+            });
+        }
+
         let mut x_post_id = None;
         let mut nostr_event_id = None;
         let mut publish_errors = Vec::new();
         let should_publish = agent_return.stance != Stance::Decline
-            && agent_return.stance != Stance::Failed
             && !self.config.dry_run
             && (self.x_publisher.is_enabled() || self.nostr_publisher.is_enabled());
 
-        if agent_return.stance != Stance::Decline && agent_return.stance != Stance::Failed {
+        if agent_return.stance != Stance::Decline {
             if self.config.dry_run {
                 tracing::info!(
                     post_id = %post.id,
@@ -287,6 +295,7 @@ where
                 }
 
                 if self.nostr_publisher.is_enabled() {
+                    let rendered = render_nostr_note(post, &agent_return);
                     match self.nostr_publisher.publish(&rendered).await {
                         Ok(result) => nostr_event_id = Some(result.id),
                         Err(error) => {
@@ -490,6 +499,22 @@ fn render_reply(post: &SourcePost, agent_return: &AgentReturn) -> RenderedPost {
         source_post_id: post.id.clone(),
         source_post_url: post.url.clone(),
     }
+}
+
+fn render_nostr_note(post: &SourcePost, agent_return: &AgentReturn) -> RenderedPost {
+    let mut rendered = render_reply(post, agent_return);
+    let source_url = rendered.source_post_url.trim();
+
+    if source_url.is_empty() {
+        return rendered;
+    }
+
+    rendered.text = if rendered.text.trim().is_empty() {
+        source_url.to_string()
+    } else {
+        format!("{}\n\n{}", rendered.text.trim_end(), source_url)
+    };
+    rendered
 }
 
 pub fn candidate_slug(post: &SourcePost) -> String {
@@ -760,6 +785,17 @@ mod tests {
         }
     }
 
+    fn sample_failed_agent_return() -> AgentReturn {
+        AgentReturn {
+            stance: Stance::Failed,
+            raw_path: "raw/news/item.md".to_string(),
+            raw_slug: Some("item".to_string()),
+            thesis_path: None,
+            thesis_slug: None,
+            one_liner: None,
+        }
+    }
+
     #[tokio::test]
     async fn poll_once_processes_posts_serially_and_records_state() {
         let state = Arc::new(FakeStateStore::new());
@@ -924,6 +960,96 @@ mod tests {
         assert_eq!(record.stance, Stance::Critique);
         assert_eq!(record.raw_path.as_deref(), Some("raw/news/item.md"));
         assert_eq!(record.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[tokio::test]
+    async fn agent_failed_stance_records_state_and_returns_failed_result() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_failed_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect("process");
+
+        assert!(
+            matches!(&results[0].1, ProcessResult::Failed { error } if error.contains("failed stance"))
+        );
+        let record = state
+            .get_processed("1")
+            .await
+            .expect("state")
+            .expect("recorded failure");
+        assert_eq!(record.stance, Stance::Failed);
+        assert_eq!(record.raw_path.as_deref(), Some("raw/news/item.md"));
+        assert!(record.thesis_slug.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_nostr_publish_includes_source_url_in_note_text() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: true,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr.clone(),
+            state,
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                dry_run: false,
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect("process");
+
+        assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
+        let published = nostr.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].text, "One line.\n\nhttps://example.com/post");
     }
 
     #[tokio::test]
