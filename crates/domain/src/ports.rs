@@ -99,6 +99,8 @@ pub enum HarnessError {
     },
     #[error("process timed out after {timeout_secs}s")]
     Timeout { timeout_secs: u64 },
+    #[error("invalid template: {0}")]
+    InvalidTemplate(String),
     #[error("invalid response: {0}")]
     InvalidResponse(String),
     #[error("validation error: {message}")]

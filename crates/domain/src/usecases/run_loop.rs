@@ -228,6 +228,9 @@ where
 
         let agent_return = match self.harness.process_post(ctx).await {
             Ok(agent_return) => agent_return,
+            Err(error @ HarnessError::InvalidTemplate(_)) => {
+                return Err(RunLoopError::HarnessConfig(error.to_string()));
+            }
             Err(error) => {
                 let raw = match &error {
                     HarnessError::Validation { raw, .. } => Some(raw.as_ref()),
@@ -393,6 +396,8 @@ pub enum RunLoopError {
     PostSource(String),
     #[error("State error: {0}")]
     State(String),
+    #[error("Harness configuration error: {0}")]
+    HarnessConfig(String),
 }
 
 fn state_error(error: StateError) -> RunLoopError {
@@ -596,6 +601,17 @@ mod tests {
                     one_liner: None,
                 })),
             })
+        }
+    }
+
+    struct InvalidTemplateHarness;
+
+    #[async_trait]
+    impl Harness for InvalidTemplateHarness {
+        async fn process_post(&self, _ctx: PostContext) -> Result<AgentReturn, HarnessError> {
+            Err(HarnessError::InvalidTemplate(
+                "unknown template token: POST_HEADLINE".to_string(),
+            ))
         }
     }
 
@@ -1082,6 +1098,54 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_once_does_not_record_or_advance_on_invalid_template() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(InvalidTemplateHarness),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["tester".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop.poll_once().await.expect("poll");
+
+        assert!(results.is_empty());
+        assert!(
+            state
+                .get_processed("1", "test-lens")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .get_account_state(&cursor_account_key("test-lens", "tester"))
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

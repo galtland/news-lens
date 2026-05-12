@@ -8,6 +8,22 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
+const ALLOWED_TEMPLATE_TOKENS: &[&str] = &[
+    "{{POST_ID}}",
+    "{{POST_TEXT}}",
+    "{{POST_AUTHOR}}",
+    "{{POST_URL}}",
+    "{{POST_CREATED_AT}}",
+    "{{POST_JSON}}",
+    "{{WIKI_PATH}}",
+    "{{LENS_PATH}}",
+    "{{LENS_ID}}",
+    "{{LENS_VOICE}}",
+    "{{LENS_REGISTER}}",
+    "{{LENS_CONTENT}}",
+    "{{CANDIDATE_SLUG}}",
+];
+
 #[derive(Debug, Clone)]
 pub struct HarnessConfig {
     pub command: String,
@@ -26,6 +42,7 @@ impl SubprocessHarness {
     pub fn new(config: HarnessConfig) -> Result<Self, HarnessError> {
         let prompt_template = std::fs::read_to_string(&config.prompt_template)
             .map_err(|error| HarnessError::Io(error.to_string()))?;
+        validate_template(&prompt_template)?;
         Ok(Self {
             config,
             prompt_template,
@@ -74,6 +91,25 @@ impl SubprocessHarness {
     }
 }
 
+fn validate_template(template: &str) -> Result<(), HarnessError> {
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        let token_start = &rest[start..];
+        let Some(end) = token_start.find("}}") else {
+            return Ok(());
+        };
+
+        let token = &token_start[..end + 2];
+        if !ALLOWED_TEMPLATE_TOKENS.contains(&token) {
+            return Err(unknown_template_token(token));
+        }
+        rest = &token_start[end + 2..];
+    }
+
+    Ok(())
+}
+
 fn render_template(template: &str, substitutions: &[(&str, &str)]) -> Result<String, HarnessError> {
     let mut rendered = String::with_capacity(template.len());
     let mut rest = template;
@@ -93,17 +129,18 @@ fn render_template(template: &str, substitutions: &[(&str, &str)]) -> Result<Str
         {
             rendered.push_str(replacement);
         } else {
-            let token_name = token.trim_start_matches("{{").trim_end_matches("}}").trim();
-            return Err(HarnessError::InvalidResponse(format!(
-                "unknown template token: {}",
-                token_name
-            )));
+            return Err(unknown_template_token(token));
         }
         rest = &token_start[end + 2..];
     }
 
     rendered.push_str(rest);
     Ok(rendered)
+}
+
+fn unknown_template_token(token: &str) -> HarnessError {
+    let token_name = token.trim_start_matches("{{").trim_end_matches("}}").trim();
+    HarnessError::InvalidTemplate(format!("unknown template token: {}", token_name))
 }
 
 #[async_trait]
@@ -287,6 +324,25 @@ mod tests {
         .expect_err("missing prompt");
 
         assert!(matches!(error, HarnessError::Io(_)));
+    }
+
+    #[test]
+    fn harness_rejects_unknown_prompt_token_at_construction() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "Post: {{POST_HEADLINE}}\n").expect("prompt");
+
+        let error = SubprocessHarness::new(HarnessConfig {
+            command: "true".to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+        })
+        .expect_err("invalid prompt");
+
+        assert!(
+            matches!(error, HarnessError::InvalidTemplate(message) if message.contains("POST_HEADLINE"))
+        );
     }
 
     #[tokio::test]
@@ -539,7 +595,7 @@ exit 7
             .expect_err("unknown token");
 
         assert!(
-            matches!(error, HarnessError::InvalidResponse(message) if message.contains("POST_HEADLINE"))
+            matches!(error, HarnessError::InvalidTemplate(message) if message.contains("POST_HEADLINE"))
         );
     }
 
