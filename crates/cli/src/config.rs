@@ -105,6 +105,9 @@ pub struct XConfig {
 pub struct XReadConfig {
     #[serde(default = "default_x_bearer_token_env")]
     pub bearer_token_env: String,
+
+    #[serde(default = "default_x_read_max_pages")]
+    pub max_pages: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +187,10 @@ fn default_poll_interval() -> u64 {
 
 fn default_x_bearer_token_env() -> String {
     "X_BEARER_TOKEN".to_string()
+}
+
+fn default_x_read_max_pages() -> usize {
+    5
 }
 
 fn default_x_mode() -> String {
@@ -266,6 +273,7 @@ impl Default for XReadConfig {
     fn default() -> Self {
         Self {
             bearer_token_env: default_x_bearer_token_env(),
+            max_pages: default_x_read_max_pages(),
         }
     }
 }
@@ -364,6 +372,7 @@ ignore_patterns = []
 
 [x.read]
 bearer_token_env = "X_BEARER_TOKEN"
+max_pages = 5
 
 [x.write]
 enabled = false
@@ -391,6 +400,9 @@ relays = ["wss://relay.damus.io"]
         }
         if self.harness.timeout_secs == 0 {
             anyhow::bail!("harness.timeout_secs must be greater than 0");
+        }
+        if !(1..=10).contains(&self.x.read.max_pages) {
+            anyhow::bail!("x.read.max_pages must be between 1 and 10");
         }
         Ok(())
     }
@@ -431,6 +443,17 @@ mod tests {
         let error = AppConfig::load(Some(&path)).expect_err("invalid config");
 
         assert!(error.to_string().contains("harness.command"));
+    }
+
+    #[test]
+    fn load_rejects_x_read_max_pages_above_hard_cap() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[x.read]\nmax_pages = 11\n").expect("write config");
+
+        let error = AppConfig::load(Some(&path)).expect_err("invalid config");
+
+        assert!(error.to_string().contains("x.read.max_pages"));
     }
 
     #[test]

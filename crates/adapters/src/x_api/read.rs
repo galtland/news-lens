@@ -9,19 +9,39 @@ use serde::de::DeserializeOwned;
 use std::time::Duration;
 use time::OffsetDateTime;
 
+const DEFAULT_TIMELINE_PAGE_CAP: usize = 5;
+const MAX_TIMELINE_PAGE_CAP: usize = 10;
+
 /// X API post source for reading user timelines
 pub struct XPostSource {
     client: Client,
     bearer_token: SecretString,
     base_url: String,
+    timeline_page_cap: usize,
 }
 
 impl XPostSource {
     pub fn new(bearer_token: SecretString) -> Self {
-        Self::with_base_url(bearer_token, "https://api.twitter.com".to_string())
+        Self::with_page_cap(bearer_token, DEFAULT_TIMELINE_PAGE_CAP)
+    }
+
+    pub fn with_page_cap(bearer_token: SecretString, timeline_page_cap: usize) -> Self {
+        Self::with_base_url_and_page_cap(
+            bearer_token,
+            "https://api.twitter.com".to_string(),
+            timeline_page_cap,
+        )
     }
 
     pub fn with_base_url(bearer_token: SecretString, base_url: String) -> Self {
+        Self::with_base_url_and_page_cap(bearer_token, base_url, DEFAULT_TIMELINE_PAGE_CAP)
+    }
+
+    pub fn with_base_url_and_page_cap(
+        bearer_token: SecretString,
+        base_url: String,
+        timeline_page_cap: usize,
+    ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -31,6 +51,7 @@ impl XPostSource {
             client,
             bearer_token,
             base_url,
+            timeline_page_cap: timeline_page_cap.clamp(1, MAX_TIMELINE_PAGE_CAP),
         }
     }
 
@@ -49,35 +70,7 @@ impl XPostSource {
             .await
             .map_err(|e| PostSourceError::Network(e.to_string()))?;
 
-        if response.status() == 401 {
-            return Err(PostSourceError::Auth("Invalid bearer token".to_string()));
-        }
-
-        if response.status() == 429 {
-            let retry_after = response
-                .headers()
-                .get("x-rate-limit-reset")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(|ts| {
-                    let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
-                    Duration::from_secs(ts.saturating_sub(now))
-                });
-            return Err(PostSourceError::RateLimited(retry_after));
-        }
-
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(PostSourceError::Api(format!(
-                "Failed to get user: {}",
-                body
-            )));
-        }
-
-        let user_response: UserResponse = response
-            .json()
-            .await
-            .map_err(|e| PostSourceError::Api(e.to_string()))?;
+        let user_response: UserResponse = parse_x_response(response, "users/by/username").await?;
 
         Ok(user_response.data.id)
     }
@@ -91,11 +84,13 @@ impl XPostSource {
     ) -> Result<Vec<SourcePost>, PostSourceError> {
         let mut posts = Vec::new();
         let mut pagination_token = None;
+        let mut pages_fetched = 0usize;
 
         loop {
             let tweets_response = self
                 .fetch_user_tweets_page(user_id, since_id, pagination_token.as_deref())
                 .await?;
+            pages_fetched += 1;
 
             posts.extend(
                 tweets_response
@@ -112,6 +107,15 @@ impl XPostSource {
             let Some(next_token) = next_token else {
                 break;
             };
+            if pages_fetched >= self.timeline_page_cap {
+                tracing::info!(
+                    account = %username,
+                    pages_fetched,
+                    page_cap = self.timeline_page_cap,
+                    "X tweet pagination cap reached; since_id will catch up on subsequent runs"
+                );
+                break;
+            }
 
             pagination_token = Some(next_token);
         }
@@ -151,7 +155,7 @@ impl XPostSource {
             .await
             .map_err(|e| PostSourceError::Network(e.to_string()))?;
 
-        parse_x_response(response, "tweets").await
+        parse_x_response(response, "users/:id/tweets").await
     }
 
     /// Fetch a tweet directly by ID.
@@ -507,6 +511,74 @@ mod tests {
 
         let source =
             XPostSource::with_base_url(SecretString::new("test-token".into()), mock_server.uri());
+
+        let posts = source.fetch_posts("testuser", None).await.unwrap();
+
+        assert_eq!(
+            posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tweet1", "tweet2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_posts_stops_at_page_cap() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/by/username/testuser"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "123456789"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param_is_missing("pagination_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "tweet1",
+                        "text": "First page",
+                        "created_at": "2024-01-15T12:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-2"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "tweet2",
+                        "text": "Second page",
+                        "created_at": "2024-01-15T13:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-3"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let source = XPostSource::with_base_url_and_page_cap(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            2,
+        );
 
         let posts = source.fetch_posts("testuser", None).await.unwrap();
 

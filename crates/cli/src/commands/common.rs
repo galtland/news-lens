@@ -46,7 +46,10 @@ pub fn build_post_source(config: &AppConfig) -> Result<Arc<dyn PostSource>> {
 
 pub fn build_x_post_source(config: &AppConfig) -> Result<XPostSource> {
     let bearer_token = load_api_key(&config.x.read.bearer_token_env, "x_read")?;
-    Ok(XPostSource::new(bearer_token))
+    Ok(XPostSource::with_page_cap(
+        bearer_token,
+        config.x.read.max_pages,
+    ))
 }
 
 pub async fn build_publishers(
