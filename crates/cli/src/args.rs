@@ -74,11 +74,11 @@ pub struct ProcessArgs {
     #[arg(long, conflicts_with = "post")]
     pub jsonl: Option<PathBuf>,
 
-    /// For JSONL, skip state DB writes and suppress outbox publishing.
-    #[arg(long)]
+    /// For JSONL, skip state DB writes and suppress outbox publishing. --post never writes state or publishes.
+    #[arg(long, conflicts_with = "require_approval")]
     pub dry_run: bool,
 
-    /// For JSONL processing, write rendered posts to outbox for review.
+    /// For JSONL processing, write rendered posts to outbox for review; never publish directly.
     #[arg(long, requires = "jsonl")]
     pub require_approval: bool,
 

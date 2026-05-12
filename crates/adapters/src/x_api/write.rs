@@ -95,7 +95,7 @@ impl Publisher for XPublisher {
         }
 
         let text = match self.mode {
-            XPublishMode::NewPost => text_with_source_link(post),
+            XPublishMode::NewPost => text_with_source_link(post, self.max_chars),
             XPublishMode::Reply | XPublishMode::Quote => post.text.clone(),
         };
 
@@ -181,14 +181,60 @@ impl Publisher for XPublisher {
     }
 }
 
-fn text_with_source_link(post: &RenderedPost) -> String {
+fn text_with_source_link(post: &RenderedPost, max_chars: usize) -> String {
     let source_url = post.source_post_url.trim();
     if source_url.is_empty() {
         post.text.clone()
     } else if post.text.trim().is_empty() {
         source_url.to_string()
     } else {
-        format!("{}\n\n{}", post.text.trim_end(), source_url)
+        let separator = "\n\n";
+        if source_url.len() + separator.len() >= max_chars {
+            return source_url.to_string();
+        }
+
+        let body_limit = max_chars - source_url.len() - separator.len();
+        let body = truncate_text(post.text.trim_end(), body_limit);
+        if body.is_empty() {
+            source_url.to_string()
+        } else {
+            format!("{}{}{}", body, separator, source_url)
+        }
+    }
+}
+
+fn truncate_text(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+
+    if max_len == 0 {
+        return String::new();
+    }
+
+    if max_len <= 3 {
+        return value.chars().take(max_len).collect();
+    }
+
+    let limit = max_len - 3;
+    let mut cut = 0;
+    for (idx, _) in value.char_indices() {
+        if idx <= limit {
+            cut = idx;
+        } else {
+            break;
+        }
+    }
+
+    let candidate = value[..cut]
+        .rfind(char::is_whitespace)
+        .filter(|idx| *idx > 0)
+        .unwrap_or(cut);
+    let prefix = value[..candidate].trim_end();
+    if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}...", prefix)
     }
 }
 
@@ -300,6 +346,22 @@ mod tests {
         let result = publisher.publish(&sample_post()).await.unwrap();
 
         assert_eq!(result.id, "new_post_id");
+    }
+
+    #[test]
+    fn test_new_post_reserves_room_for_source_link() {
+        let post = RenderedPost {
+            text: "alpha beta gamma delta epsilon zeta eta theta".to_string(),
+            source_post_id: "original_tweet_id".to_string(),
+            source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+        };
+
+        let text = text_with_source_link(&post, 64);
+
+        assert!(text.len() <= 64);
+        assert!(text.ends_with("https://x.com/user/status/original_tweet_id"));
+        assert!(text.starts_with("alpha"));
+        assert!(text.contains("...\n\n"));
     }
 
     #[tokio::test]

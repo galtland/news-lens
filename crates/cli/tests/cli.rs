@@ -113,6 +113,28 @@ fn process_jsonl_configured_dry_run_does_not_write_state_db() {
 }
 
 #[test]
+fn process_jsonl_with_state_writes_never_requires_direct_publisher_credentials() {
+    let dir = TempDir::new().expect("temp dir");
+    let config_path = dir.path().join("config.toml");
+    let state_path = dir.path().join("state.sqlite");
+    let config = fixture_config_with_state(&state_path)
+        .replace("dry_run = true", "dry_run = false")
+        .replace("[x.write]\nenabled = false", "[x.write]\nenabled = true");
+    fs::write(&config_path, config).expect("write config");
+
+    let mut cmd = cargo_bin_cmd!("news-lens");
+    cmd.current_dir(workspace_root())
+        .env_remove("X_USER_TOKEN")
+        .args(["process", "--jsonl", "fixtures/posts/source_posts.jsonl"])
+        .arg("--config")
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    assert!(state_path.exists());
+}
+
+#[test]
 fn process_jsonl_require_approval_writes_outbox_and_state() {
     let dir = TempDir::new().expect("temp dir");
     let config_path = dir.path().join("config.toml");

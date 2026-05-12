@@ -139,18 +139,58 @@ impl Harness for SubprocessHarness {
             });
         }
 
-        let json_line = stdout
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .ok_or_else(|| HarnessError::InvalidResponse("stdout was empty".to_string()))?;
-
-        let raw: RawAgentReturn = serde_json::from_str(json_line)
-            .map_err(|error| HarnessError::InvalidResponse(error.to_string()))?;
+        let raw = parse_raw_agent_return(&stdout)?;
 
         raw.validate(&ctx.wiki_path)
             .map_err(|error| HarnessError::Validation(error.to_string()))
+    }
+}
+
+fn parse_raw_agent_return(stdout: &str) -> Result<RawAgentReturn, HarnessError> {
+    let mut last_error = None;
+
+    for line in stdout.lines().rev() {
+        let candidate = line.trim().trim_start_matches('\u{feff}').trim();
+        if candidate.is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<RawAgentReturn>(candidate) {
+            Ok(raw) => return Ok(raw),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let tail = stdout_tail(stdout);
+    let message = match last_error {
+        Some(error) => format!(
+            "could not parse JSON object: {}; stdout tail: {}",
+            error, tail
+        ),
+        None => "stdout was empty".to_string(),
+    };
+    Err(HarnessError::InvalidResponse(message))
+}
+
+fn stdout_tail(stdout: &str) -> String {
+    let mut lines = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    lines.reverse();
+
+    let tail = lines.join("\n");
+    if tail.len() <= 1_000 {
+        tail
+    } else {
+        let start = tail
+            .char_indices()
+            .find_map(|(idx, _)| (idx >= tail.len() - 1_000).then_some(idx))
+            .unwrap_or(0);
+        format!("...{}", &tail[start..])
     }
 }
 
@@ -281,5 +321,19 @@ sleep 5
         );
 
         assert_eq!(rendered, "Post: literal {{WIKI_PATH}}\nWiki: /tmp/wiki\n");
+    }
+
+    #[test]
+    fn parse_raw_agent_return_scans_past_trailing_diagnostics() {
+        let stdout = r#"
+diagnostic line
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
+trailing diagnostic
+"#;
+
+        let raw = parse_raw_agent_return(stdout).expect("raw JSON");
+
+        assert_eq!(raw.stance.as_deref(), Some("critique"));
+        assert_eq!(raw.thesis_slug.as_deref(), Some("item"));
     }
 }

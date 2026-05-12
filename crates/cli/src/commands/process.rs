@@ -41,10 +41,12 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
     }
 
     if let Some(path) = args.jsonl {
-        let mut dry_run = args.dry_run || config.general.dry_run;
-        if args.require_approval && dry_run {
-            tracing::info!("--require-approval overrides dry-run");
-            dry_run = false;
+        let mut state_dry_run = args.dry_run || config.general.dry_run;
+        if args.require_approval && state_dry_run {
+            tracing::info!(
+                "--require-approval overrides configured dry-run for JSONL state writes"
+            );
+            state_dry_run = false;
         }
 
         let source = JsonlPostSource::new(vec![path]);
@@ -52,7 +54,7 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
             .fetch_posts("*", None)
             .await
             .context("Failed to load JSONL posts")?;
-        let state_store: Arc<dyn StateStore> = if dry_run {
+        let state_store: Arc<dyn StateStore> = if state_dry_run {
             Arc::new(InMemoryStateStore::new())
         } else {
             Arc::new(
@@ -61,14 +63,11 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
                     .context("Failed to initialize SQLite state store")?,
             )
         };
-        let publishing_dry_run = !args.require_approval;
-        let (x_publisher, nostr_publisher) = build_publishers(
-            &config,
-            publishing_dry_run,
-            args.require_approval,
-            args.outbox,
-        )
-        .await?;
+        // `process --jsonl` never publishes directly in v1. Approval mode routes
+        // commentary to the outbox; otherwise publishers stay disabled.
+        let outbox_dry_run = !args.require_approval;
+        let (x_publisher, nostr_publisher) =
+            build_publishers(&config, outbox_dry_run, args.require_approval, args.outbox).await?;
         let run_loop = RunLoop::new(
             Arc::new(source),
             Arc::new(harness),
@@ -81,7 +80,7 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
                 include_replies: config.watch.include_replies,
                 include_reposts: config.watch.include_reposts,
                 ignore_patterns: config.watch.ignore_patterns.clone(),
-                dry_run: publishing_dry_run,
+                dry_run: outbox_dry_run,
                 wiki_path: config.wiki.path.clone(),
                 lens,
                 rate_limit_per_minute: None,

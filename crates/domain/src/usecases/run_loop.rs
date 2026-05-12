@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
 use crate::{
+    compare_post_ids,
     model::{
         AccountState, AgentReturn, Lens, PostContext, ProcessResult, ProcessedPostRecord,
         RenderedPost, SourcePost, Stance,
@@ -166,19 +167,22 @@ where
             .await
             .map_err(|error| RunLoopError::PostSource(error.to_string()))?;
 
+        let last_fetched_id = posts
+            .iter()
+            .map(|post| post.id.as_str())
+            .max_by(|a, b| compare_post_ids(a, b))
+            .map(str::to_string);
         let filtered_posts = self.filter_posts(posts);
         let mut results = Vec::new();
-        let mut last_id = since_id.map(String::from);
 
         for post in filtered_posts {
-            last_id = Some(post.id.clone());
             self.rate_limiter.acquire().await;
             let post_id = post.id.clone();
             let result = self.process_post(&post).await;
             results.push((post_id, result));
         }
 
-        if let Some(last_id) = last_id {
+        if let Some(last_id) = last_fetched_id.or_else(|| since_id.map(String::from)) {
             let new_state = AccountState {
                 account: account.to_string(),
                 since_id: Some(last_id),
@@ -642,6 +646,51 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
         assert!(state.get_processed("1").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn poll_once_advances_cursor_past_filtered_posts() {
+        let state = Arc::new(FakeStateStore {
+            accounts: StdMutex::new(HashMap::new()),
+            processed: StdMutex::new(HashMap::new()),
+        });
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            published: StdMutex::new(vec![]),
+        });
+        let mut filtered_reply = sample_post("2");
+        filtered_reply.is_reply = true;
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1"), filtered_reply],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["tester".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop.poll_once().await.expect("poll");
+
+        assert_eq!(results.len(), 1);
+        let account = state
+            .get_account_state("tester")
+            .await
+            .expect("state")
+            .expect("account state");
+        assert_eq!(account.since_id.as_deref(), Some("2"));
     }
 
     #[test]
