@@ -295,14 +295,14 @@ pub(crate) fn normalize_existing_wiki_file(
                 path: wiki_root.display().to_string(),
             })?;
 
-    let wiki_relative_path = path.strip_prefix("wiki").unwrap_or(path);
-    let canonical = wiki_root
-        .join(wiki_relative_path)
-        .canonicalize()
-        .map_err(|_| AgentValidationError::MissingFile {
-            field,
-            path: value.to_string(),
-        })?;
+    let canonical =
+        wiki_root
+            .join(path)
+            .canonicalize()
+            .map_err(|_| AgentValidationError::MissingFile {
+                field,
+                path: value.to_string(),
+            })?;
 
     if !canonical.starts_with(&wiki_root) {
         return Err(AgentValidationError::OutsideWikiRoot {
@@ -352,9 +352,9 @@ mod tests {
     fn wiki_with_files() -> tempfile::TempDir {
         let dir = tempfile::TempDir::new().expect("temp dir");
         std::fs::create_dir_all(dir.path().join("raw/news")).expect("raw dir");
-        std::fs::create_dir_all(dir.path().join("theses")).expect("theses dir");
+        std::fs::create_dir_all(dir.path().join("wiki/theses")).expect("theses dir");
         std::fs::write(dir.path().join("raw/news/item.md"), "# News").expect("raw file");
-        std::fs::write(dir.path().join("theses/item.md"), "# Thesis").expect("thesis file");
+        std::fs::write(dir.path().join("wiki/theses/item.md"), "# Thesis").expect("thesis file");
         dir
     }
 
@@ -363,7 +363,7 @@ mod tests {
             stance: Some("critique".to_string()),
             raw_path: Some("raw/news/item.md".to_string()),
             raw_slug: Some("item".to_string()),
-            thesis_path: Some("theses/item.md".to_string()),
+            thesis_path: Some("wiki/theses/item.md".to_string()),
             thesis_slug: Some("item".to_string()),
             one_liner: Some("A concise line.".to_string()),
         }
@@ -498,7 +498,7 @@ mod tests {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
         raw.stance = Some("failed".to_string());
-        raw.thesis_path = Some("theses/item.md".to_string());
+        raw.thesis_path = Some("wiki/theses/item.md".to_string());
         raw.thesis_slug = Some(" item \n".to_string());
         raw.one_liner = None;
 
@@ -574,21 +574,6 @@ mod tests {
                 path: "theses/missing.md".to_string()
             }
         );
-    }
-
-    #[test]
-    fn validation_normalizes_wiki_prefixed_paths() {
-        let wiki = wiki_with_files();
-        let mut raw = valid_raw();
-        raw.raw_path = Some("wiki/raw/news/item.md".to_string());
-        raw.thesis_path = Some("wiki/theses/item.md".to_string());
-
-        let output = raw
-            .validate(wiki.path())
-            .expect("valid wiki-prefixed paths");
-
-        assert_eq!(output.raw_path, "raw/news/item.md");
-        assert_eq!(output.thesis_path.as_deref(), Some("theses/item.md"));
     }
 
     #[test]
