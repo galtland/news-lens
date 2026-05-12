@@ -252,6 +252,7 @@ where
 
         let mut x_post_id = None;
         let mut nostr_event_id = None;
+        let mut publish_errors = Vec::new();
 
         if agent_return.stance != Stance::Decline && agent_return.stance != Stance::Failed {
             if self.config.dry_run {
@@ -268,6 +269,7 @@ where
                         Ok(result) => x_post_id = Some(result.id),
                         Err(error) => {
                             tracing::error!(error = %error, "Failed to publish to X");
+                            publish_errors.push(format!("X publish failed: {}", error));
                         }
                     }
                 }
@@ -277,10 +279,27 @@ where
                         Ok(result) => nostr_event_id = Some(result.id),
                         Err(error) => {
                             tracing::error!(error = %error, "Failed to publish to Nostr");
+                            publish_errors.push(format!("Nostr publish failed: {}", error));
                         }
                     }
                 }
             }
+        }
+
+        if !publish_errors.is_empty() {
+            let message = publish_errors.join("; ");
+            if let Err(state_error) = self
+                .record_publish_failure(
+                    post,
+                    &agent_return,
+                    x_post_id.clone(),
+                    nostr_event_id.clone(),
+                )
+                .await
+            {
+                tracing::error!(error = %state_error, "Failed to record publish failure");
+            }
+            return ProcessResult::Failed { error: message };
         }
 
         let record = ProcessedPostRecord {
@@ -316,6 +335,26 @@ where
             thesis_slug: None,
             x_post_id: None,
             nostr_event_id: None,
+        };
+        self.state_store.record_processed(&record).await
+    }
+
+    async fn record_publish_failure(
+        &self,
+        post: &SourcePost,
+        agent_return: &AgentReturn,
+        x_post_id: Option<String>,
+        nostr_event_id: Option<String>,
+    ) -> Result<(), StateError> {
+        let record = ProcessedPostRecord {
+            post_id: post.id.clone(),
+            lens_id: self.config.lens.id.clone(),
+            processed_at: self.clock.now(),
+            stance: Stance::Failed,
+            raw_path: Some(agent_return.raw_path.clone()),
+            thesis_slug: agent_return.thesis_slug.clone(),
+            x_post_id,
+            nostr_event_id,
         };
         self.state_store.record_processed(&record).await
     }
@@ -502,12 +541,16 @@ mod tests {
 
     struct FakePublisher {
         enabled: bool,
+        fail_message: Option<String>,
         published: StdMutex<Vec<RenderedPost>>,
     }
 
     #[async_trait]
     impl Publisher for FakePublisher {
         async fn publish(&self, post: &RenderedPost) -> Result<PublishResult, PublishError> {
+            if let Some(message) = &self.fail_message {
+                return Err(PublishError::Api(message.clone()));
+            }
             self.published.lock().unwrap().push(post.clone());
             Ok(PublishResult {
                 id: "published-id".to_string(),
@@ -617,10 +660,12 @@ mod tests {
         });
         let x = Arc::new(FakePublisher {
             enabled: false,
+            fail_message: None,
             published: StdMutex::new(vec![]),
         });
         let nostr = Arc::new(FakePublisher {
             enabled: false,
+            fail_message: None,
             published: StdMutex::new(vec![]),
         });
         let run_loop = RunLoop::new(
@@ -656,10 +701,12 @@ mod tests {
         });
         let x = Arc::new(FakePublisher {
             enabled: false,
+            fail_message: None,
             published: StdMutex::new(vec![]),
         });
         let nostr = Arc::new(FakePublisher {
             enabled: false,
+            fail_message: None,
             published: StdMutex::new(vec![]),
         });
         let mut filtered_reply = sample_post("2");
@@ -691,6 +738,57 @@ mod tests {
             .expect("state")
             .expect("account state");
         assert_eq!(account.since_id.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn publisher_failure_records_failed_state() {
+        let state = Arc::new(FakeStateStore {
+            accounts: StdMutex::new(HashMap::new()),
+            processed: StdMutex::new(HashMap::new()),
+        });
+        let x = Arc::new(FakePublisher {
+            enabled: true,
+            fail_message: Some("outbox unavailable".to_string()),
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec![],
+                dry_run: false,
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect("process");
+
+        assert!(matches!(results[0].1, ProcessResult::Failed { .. }));
+        let record = state
+            .get_processed("1")
+            .await
+            .expect("state")
+            .expect("recorded failure");
+        assert_eq!(record.stance, Stance::Failed);
+        assert_eq!(record.raw_path.as_deref(), Some("raw/news/item.md"));
+        assert_eq!(record.thesis_slug.as_deref(), Some("item"));
     }
 
     #[test]

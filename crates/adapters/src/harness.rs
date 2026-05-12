@@ -117,17 +117,26 @@ impl Harness for SubprocessHarness {
             .spawn()
             .map_err(|error| HarnessError::Io(error.to_string()))?;
 
-        let output = timeout(Duration::from_secs(self.config.timeout_secs), async move {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(prompt.as_bytes()).await?;
-            }
-            child.wait_with_output().await
-        })
-        .await
-        .map_err(|_| HarnessError::Timeout {
-            timeout_secs: self.config.timeout_secs,
-        })?
-        .map_err(|error| HarnessError::Io(error.to_string()))?;
+        let stdin = child.stdin.take();
+        let (output, stdin_result) =
+            timeout(Duration::from_secs(self.config.timeout_secs), async move {
+                let write_stdin = async move {
+                    if let Some(mut stdin) = stdin {
+                        stdin.write_all(prompt.as_bytes()).await?;
+                        stdin.shutdown().await?;
+                    }
+                    Ok::<(), std::io::Error>(())
+                };
+
+                let (stdin_result, output_result) =
+                    tokio::join!(write_stdin, child.wait_with_output());
+                output_result.map(|output| (output, stdin_result))
+            })
+            .await
+            .map_err(|_| HarnessError::Timeout {
+                timeout_secs: self.config.timeout_secs,
+            })?
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -140,6 +149,14 @@ impl Harness for SubprocessHarness {
         }
 
         let raw = parse_raw_agent_return(&stdout)?;
+        if let Err(error) = stdin_result {
+            return Err(HarnessError::Io(format!(
+                "stdin write failed: {}; stdout tail: {}; stderr: {}",
+                error,
+                stdout_tail(&stdout),
+                stderr
+            )));
+        }
 
         raw.validate(&ctx.wiki_path)
             .map_err(|error| HarnessError::Validation(error.to_string()))
@@ -147,29 +164,28 @@ impl Harness for SubprocessHarness {
 }
 
 fn parse_raw_agent_return(stdout: &str) -> Result<RawAgentReturn, HarnessError> {
-    let mut last_error = None;
+    let Some(final_line) = stdout.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return Err(HarnessError::InvalidResponse(
+            "stdout was empty".to_string(),
+        ));
+    };
+    let candidate = final_line.trim().trim_start_matches('\u{feff}').trim();
+    let tail = stdout_tail(stdout);
+    let raw = serde_json::from_str::<RawAgentReturn>(candidate).map_err(|error| {
+        HarnessError::InvalidResponse(format!(
+            "final stdout line was not contract JSON: {}; stdout tail: {}",
+            error, tail
+        ))
+    })?;
 
-    for line in stdout.lines().rev() {
-        let candidate = line.trim().trim_start_matches('\u{feff}').trim();
-        if candidate.is_empty() {
-            continue;
-        }
-
-        match serde_json::from_str::<RawAgentReturn>(candidate) {
-            Ok(raw) => return Ok(raw),
-            Err(error) => last_error = Some(error),
-        }
+    if raw.stance.is_none() {
+        return Err(HarnessError::InvalidResponse(format!(
+            "final JSON object is not the agent contract: missing field `stance`; stdout tail: {}",
+            tail
+        )));
     }
 
-    let tail = stdout_tail(stdout);
-    let message = match last_error {
-        Some(error) => format!(
-            "could not parse JSON object: {}; stdout tail: {}",
-            error, tail
-        ),
-        None => "stdout was empty".to_string(),
-    };
-    Err(HarnessError::InvalidResponse(message))
+    Ok(raw)
 }
 
 fn stdout_tail(stdout: &str) -> String {
@@ -324,16 +340,43 @@ sleep 5
     }
 
     #[test]
-    fn parse_raw_agent_return_scans_past_trailing_diagnostics() {
+    fn parse_raw_agent_return_uses_final_json_line() {
         let stdout = r#"
 diagnostic line
 {"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
-trailing diagnostic
 "#;
 
         let raw = parse_raw_agent_return(stdout).expect("raw JSON");
 
         assert_eq!(raw.stance.as_deref(), Some("critique"));
         assert_eq!(raw.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[test]
+    fn parse_raw_agent_return_rejects_trailing_non_contract_json() {
+        let stdout = r#"
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
+{"trace_id":"abc"}
+"#;
+
+        let error = parse_raw_agent_return(stdout).expect_err("not contract JSON");
+
+        assert!(
+            matches!(error, HarnessError::InvalidResponse(message) if message.contains("missing field `stance`"))
+        );
+    }
+
+    #[test]
+    fn parse_raw_agent_return_rejects_malformed_final_line() {
+        let stdout = r#"
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
+not json
+"#;
+
+        let error = parse_raw_agent_return(stdout).expect_err("malformed final line");
+
+        assert!(
+            matches!(error, HarnessError::InvalidResponse(message) if message.contains("final stdout line"))
+        );
     }
 }

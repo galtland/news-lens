@@ -20,8 +20,8 @@ use std::cmp::Ordering;
 /// (length first, then lexicographic), which works for arbitrarily large values.
 /// Otherwise falls back to plain lexicographic comparison.
 pub fn compare_post_ids(a: &str, b: &str) -> Ordering {
-    let a_is_digits = a.as_bytes().iter().all(|byte| byte.is_ascii_digit());
-    let b_is_digits = b.as_bytes().iter().all(|byte| byte.is_ascii_digit());
+    let a_is_digits = !a.is_empty() && a.as_bytes().iter().all(|byte| byte.is_ascii_digit());
+    let b_is_digits = !b.is_empty() && b.as_bytes().iter().all(|byte| byte.is_ascii_digit());
 
     if a_is_digits && b_is_digits {
         let a_norm = normalize_numeric_id(a);
@@ -62,5 +62,7 @@ mod tests {
     fn compare_non_numeric_ids_lexicographically() {
         assert_eq!(compare_post_ids("tweet1", "tweet2"), Ordering::Less);
         assert_eq!(compare_post_ids("abc", "100"), Ordering::Greater);
+        assert_eq!(compare_post_ids("", "0"), Ordering::Less);
+        assert_eq!(compare_post_ids("0", ""), Ordering::Greater);
     }
 }

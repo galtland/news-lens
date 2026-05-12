@@ -128,12 +128,7 @@ impl RawAgentReturn {
         let raw_path = self
             .raw_path
             .ok_or(AgentValidationError::MissingField("raw_path"))?;
-        if resolve_existing_wiki_file(wiki_root, &raw_path).is_none() {
-            return Err(AgentValidationError::MissingPath {
-                field: "raw_path",
-                path: raw_path,
-            });
-        }
+        let raw_path = normalize_existing_wiki_file(wiki_root, "raw_path", &raw_path)?;
 
         let mut one_liner = self.one_liner.map(|value| truncate_one_liner(&value, 240));
 
@@ -144,12 +139,7 @@ impl RawAgentReturn {
             let thesis_path = self
                 .thesis_path
                 .ok_or(AgentValidationError::MissingField("thesis_path"))?;
-            if resolve_existing_wiki_file(wiki_root, &thesis_path).is_none() {
-                return Err(AgentValidationError::MissingPath {
-                    field: "thesis_path",
-                    path: thesis_path,
-                });
-            }
+            let thesis_path = normalize_existing_wiki_file(wiki_root, "thesis_path", &thesis_path)?;
 
             let thesis_slug = self
                 .thesis_slug
@@ -186,8 +176,10 @@ pub enum AgentValidationError {
     MissingField(&'static str),
     #[error("invalid stance: {0}")]
     InvalidStance(String),
+    #[error("{field} points outside the wiki root: {path}")]
+    OutsideWikiRoot { field: &'static str, path: String },
     #[error("{field} does not exist: {path}")]
-    MissingPath { field: &'static str, path: String },
+    MissingFile { field: &'static str, path: String },
 }
 
 /// Publishing mode for X posts.
@@ -250,7 +242,11 @@ pub enum ProcessResult {
     Failed { error: String },
 }
 
-fn resolve_existing_wiki_file(wiki_root: &Path, value: &str) -> Option<PathBuf> {
+fn normalize_existing_wiki_file(
+    wiki_root: &Path,
+    field: &'static str,
+    value: &str,
+) -> Result<String, AgentValidationError> {
     let path = Path::new(value);
     if path.is_absolute()
         || value.trim().is_empty()
@@ -258,27 +254,51 @@ fn resolve_existing_wiki_file(wiki_root: &Path, value: &str) -> Option<PathBuf> 
             .components()
             .any(|component| matches!(component, Component::ParentDir))
     {
-        return None;
+        return Err(AgentValidationError::OutsideWikiRoot {
+            field,
+            path: value.to_string(),
+        });
     }
 
-    let wiki_root = wiki_root.canonicalize().ok()?;
-    let mut candidates = vec![wiki_root.join(path)];
+    let wiki_root = wiki_root
+        .canonicalize()
+        .map_err(|_| AgentValidationError::MissingFile {
+            field,
+            path: value.to_string(),
+        })?;
 
-    if let Ok(stripped) = path.strip_prefix("wiki") {
-        candidates.push(wiki_root.join(stripped));
+    let wiki_relative_path = path.strip_prefix("wiki").unwrap_or(path);
+    let canonical = wiki_root
+        .join(wiki_relative_path)
+        .canonicalize()
+        .map_err(|_| AgentValidationError::MissingFile {
+            field,
+            path: value.to_string(),
+        })?;
+
+    if !canonical.starts_with(&wiki_root) {
+        return Err(AgentValidationError::OutsideWikiRoot {
+            field,
+            path: value.to_string(),
+        });
     }
 
-    candidates.into_iter().find_map(|candidate| {
-        let canonical = candidate.canonicalize().ok()?;
-        if canonical.starts_with(&wiki_root)
-            && canonical.is_file()
-            && canonical.extension().and_then(|ext| ext.to_str()) == Some("md")
-        {
-            Some(canonical)
-        } else {
-            None
-        }
-    })
+    if !canonical.is_file() || canonical.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return Err(AgentValidationError::MissingFile {
+            field,
+            path: value.to_string(),
+        });
+    }
+
+    let relative =
+        canonical
+            .strip_prefix(&wiki_root)
+            .map_err(|_| AgentValidationError::OutsideWikiRoot {
+                field,
+                path: value.to_string(),
+            })?;
+
+    Ok(relative.to_string_lossy().into_owned())
 }
 
 fn truncate_one_liner(value: &str, max_len: usize) -> String {
@@ -406,11 +426,26 @@ mod tests {
         let error = raw.validate(wiki.path()).expect_err("missing raw file");
         assert_eq!(
             error,
-            AgentValidationError::MissingPath {
+            AgentValidationError::MissingFile {
                 field: "raw_path",
                 path: "raw/news/missing.md".to_string()
             }
         );
+    }
+
+    #[test]
+    fn validation_normalizes_wiki_prefixed_paths() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.raw_path = Some("wiki/raw/news/item.md".to_string());
+        raw.thesis_path = Some("wiki/theses/item.md".to_string());
+
+        let output = raw
+            .validate(wiki.path())
+            .expect("valid wiki-prefixed paths");
+
+        assert_eq!(output.raw_path, "raw/news/item.md");
+        assert_eq!(output.thesis_path.as_deref(), Some("theses/item.md"));
     }
 
     #[test]
@@ -424,7 +459,7 @@ mod tests {
         absolute.raw_path = Some(outside.display().to_string());
         assert!(matches!(
             absolute.validate(wiki.path()),
-            Err(AgentValidationError::MissingPath {
+            Err(AgentValidationError::OutsideWikiRoot {
                 field: "raw_path",
                 ..
             })
@@ -434,7 +469,7 @@ mod tests {
         parent.raw_path = Some("../outside.md".to_string());
         assert!(matches!(
             parent.validate(wiki.path()),
-            Err(AgentValidationError::MissingPath {
+            Err(AgentValidationError::OutsideWikiRoot {
                 field: "raw_path",
                 ..
             })
@@ -444,7 +479,7 @@ mod tests {
         empty.raw_path = Some(String::new());
         assert!(matches!(
             empty.validate(wiki.path()),
-            Err(AgentValidationError::MissingPath {
+            Err(AgentValidationError::OutsideWikiRoot {
                 field: "raw_path",
                 ..
             })

@@ -24,6 +24,11 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
     let harness = build_harness(&config);
 
     if let Some(post_arg) = args.post {
+        if args.dry_run {
+            tracing::info!(
+                "--dry-run is implicit for process --post; no state or publishing occurs"
+            );
+        }
         let post = synthetic_post(post_arg, args.text)?;
         let candidate_slug = candidate_slug(&post);
         let ctx = news_lens_domain::PostContext {

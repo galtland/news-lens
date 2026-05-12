@@ -32,12 +32,8 @@ pub async fn execute(args: WikiArgs, config_path: Option<PathBuf>) -> Result<()>
 }
 
 fn status(path: &Path) -> WikiStatus {
-    let raw_news_count = count_markdown_files(&path.join("raw/news"))
-        .or_else(|| count_markdown_files(&path.join("wiki/raw/news")))
-        .unwrap_or(0);
-    let theses_count = count_markdown_files(&path.join("theses"))
-        .or_else(|| count_markdown_files(&path.join("wiki/theses")))
-        .unwrap_or(0);
+    let raw_news_count = count_markdown_files(&path.join("raw/news")).unwrap_or(0);
+    let theses_count = count_markdown_files(&path.join("theses")).unwrap_or(0);
     let uncommented_news_count = raw_news_count.saturating_sub(theses_count);
 
     WikiStatus {
