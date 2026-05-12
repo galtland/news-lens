@@ -266,12 +266,12 @@ where
         let mut x_post_id = None;
         let mut nostr_event_id = None;
         let mut publish_errors = Vec::new();
-        let should_publish = agent_return.stance != Stance::Decline
-            && !self.config.dry_run
-            && (self.x_publisher.is_enabled() || self.nostr_publisher.is_enabled());
+        let publishers_enabled = self.x_publisher.is_enabled() || self.nostr_publisher.is_enabled();
+        let should_publish =
+            agent_return.stance != Stance::Decline && !self.config.dry_run && publishers_enabled;
 
         if agent_return.stance != Stance::Decline {
-            if self.config.dry_run {
+            if self.config.dry_run && publishers_enabled {
                 tracing::info!(
                     post_id = %post.id,
                     one_liner = ?agent_return.one_liner,
