@@ -26,6 +26,20 @@ pub struct RunLoopConfig {
     pub lens: Lens,
 }
 
+/// Result of one poll cycle, including account-level failures that did not
+/// produce post-level results.
+#[derive(Debug, Default)]
+pub struct PollOnceReport {
+    pub results: Vec<(String, ProcessResult)>,
+    pub account_errors: Vec<PollAccountError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PollAccountError {
+    pub account: String,
+    pub error: String,
+}
+
 impl Default for RunLoopConfig {
     fn default() -> Self {
         Self {
@@ -102,22 +116,33 @@ where
 
     /// Run a single poll cycle for all configured accounts.
     pub async fn poll_once(&self) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
-        let mut results = Vec::new();
+        Ok(self.poll_once_report().await?.results)
+    }
+
+    /// Run a single poll cycle and keep account-level failures for callers that
+    /// need to distinguish an idle poll from a fully failed one-shot run.
+    pub async fn poll_once_report(&self) -> Result<PollOnceReport, RunLoopError> {
+        let mut report = PollOnceReport::default();
 
         for account in &self.config.accounts {
             match self.poll_account(account).await {
-                Ok(account_results) => results.extend(account_results),
+                Ok(account_results) => report.results.extend(account_results),
                 Err(error) => {
+                    let error = error.to_string();
                     tracing::error!(
                         account = %account,
                         error = %error,
                         "Failed to poll account; continuing with remaining accounts"
                     );
+                    report.account_errors.push(PollAccountError {
+                        account: account.clone(),
+                        error,
+                    });
                 }
             }
         }
 
-        Ok(results)
+        Ok(report)
     }
 
     /// Process posts already supplied by a caller, used by `process --jsonl`.
@@ -1099,6 +1124,43 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn poll_once_report_retains_account_errors() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(PerAccountPostSource),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state,
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["bad".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let report = run_loop.poll_once_report().await.expect("poll");
+
+        assert!(report.results.is_empty());
+        assert_eq!(report.account_errors.len(), 1);
+        assert_eq!(report.account_errors[0].account, "bad");
+        assert!(report.account_errors[0].error.contains("temporary failure"));
     }
 
     #[tokio::test]
