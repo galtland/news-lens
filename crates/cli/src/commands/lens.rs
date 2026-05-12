@@ -43,6 +43,7 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
         let lens = load_lens(configured_path)?;
         lenses.insert(lens.id.clone(), lens);
     }
+    let configured_canonical = configured_path.canonicalize().ok();
 
     let parent = configured_path
         .parent()
@@ -61,7 +62,10 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() || path == configured_path {
+        let is_configured_path = configured_canonical
+            .as_ref()
+            .is_some_and(|configured| path.canonicalize().ok().as_ref() == Some(configured));
+        if !path.is_file() || is_configured_path {
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
