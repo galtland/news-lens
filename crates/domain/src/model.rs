@@ -130,7 +130,7 @@ impl RawAgentReturn {
             .ok_or(AgentValidationError::MissingField("raw_path"))?;
         let raw_path = normalize_existing_wiki_file(wiki_root, "raw_path", &raw_path)?;
 
-        let mut one_liner = self.one_liner.map(|value| truncate_one_liner(&value, 240));
+        let mut one_liner = self.one_liner.map(|value| normalize_one_liner(&value, 240));
 
         if matches!(
             stance,
@@ -147,6 +147,9 @@ impl RawAgentReturn {
             let required_one_liner = one_liner
                 .take()
                 .ok_or(AgentValidationError::MissingField("one_liner"))?;
+            if required_one_liner.is_empty() {
+                return Err(AgentValidationError::BlankOneLiner);
+            }
 
             return Ok(AgentReturn {
                 stance,
@@ -189,6 +192,8 @@ pub enum AgentValidationError {
     MissingWikiRoot { path: String },
     #[error("{field} does not exist: {path}")]
     MissingFile { field: &'static str, path: String },
+    #[error("one_liner is blank")]
+    BlankOneLiner,
 }
 
 /// Publishing mode for X posts.
@@ -313,7 +318,8 @@ fn normalize_existing_wiki_file(
     Ok(relative.to_string_lossy().into_owned())
 }
 
-fn truncate_one_liner(value: &str, max_len: usize) -> String {
+fn normalize_one_liner(value: &str, max_len: usize) -> String {
+    let value = value.trim();
     if value.chars().count() <= max_len {
         return value.to_string();
     }
@@ -431,6 +437,26 @@ mod tests {
         let one_liner = output.one_liner.expect("one_liner");
         assert!(one_liner.chars().count() <= 240);
         assert!(one_liner.ends_with("..."));
+    }
+
+    #[test]
+    fn validation_rejects_blank_one_liner_on_non_decline_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.one_liner = Some(" \n\t ".to_string());
+
+        let error = raw.validate(wiki.path()).expect_err("blank one_liner");
+        assert_eq!(error, AgentValidationError::BlankOneLiner);
+    }
+
+    #[test]
+    fn validation_trims_one_liner_before_publishing() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.one_liner = Some("  A concise line. \n".to_string());
+
+        let output = raw.validate(wiki.path()).expect("valid one_liner");
+        assert_eq!(output.one_liner.as_deref(), Some("A concise line."));
     }
 
     #[test]

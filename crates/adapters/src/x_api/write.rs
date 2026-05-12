@@ -100,9 +100,10 @@ impl Publisher for XPublisher {
         };
 
         // Validate content length
-        if text.len() > self.max_chars {
+        let text_chars = text.chars().count();
+        if text_chars > self.max_chars {
             return Err(PublishError::ContentTooLong {
-                len: text.len(),
+                len: text_chars,
                 max: self.max_chars,
             });
         }
@@ -189,11 +190,13 @@ pub(crate) fn format_new_post_text(post: &RenderedPost, max_chars: usize) -> Str
         source_url.to_string()
     } else {
         let separator = "\n\n";
-        if source_url.len() + separator.len() >= max_chars {
+        let source_url_chars = source_url.chars().count();
+        let separator_chars = separator.chars().count();
+        if source_url_chars + separator_chars >= max_chars {
             return source_url.to_string();
         }
 
-        let body_limit = max_chars - source_url.len() - separator.len();
+        let body_limit = max_chars - source_url_chars - separator_chars;
         let body = truncate_text(post.text.trim_end(), body_limit);
         if body.is_empty() {
             source_url.to_string()
@@ -204,7 +207,7 @@ pub(crate) fn format_new_post_text(post: &RenderedPost, max_chars: usize) -> Str
 }
 
 fn truncate_text(value: &str, max_len: usize) -> String {
-    if value.len() <= max_len {
+    if value.chars().count() <= max_len {
         return value.to_string();
     }
 
@@ -216,21 +219,12 @@ fn truncate_text(value: &str, max_len: usize) -> String {
         return value.chars().take(max_len).collect();
     }
 
-    let limit = max_len - 3;
-    let mut cut = 0;
-    for (idx, _) in value.char_indices() {
-        if idx <= limit {
-            cut = idx;
-        } else {
-            break;
-        }
-    }
-
-    let candidate = value[..cut]
+    let prefix = value.chars().take(max_len - 3).collect::<String>();
+    let candidate = prefix
         .rfind(char::is_whitespace)
         .filter(|idx| *idx > 0)
-        .unwrap_or(cut);
-    let prefix = value[..candidate].trim_end();
+        .unwrap_or(prefix.len());
+    let prefix = prefix[..candidate].trim_end();
     if prefix.is_empty() {
         String::new()
     } else {
@@ -358,9 +352,24 @@ mod tests {
 
         let text = format_new_post_text(&post, 64);
 
-        assert!(text.len() <= 64);
+        assert!(text.chars().count() <= 64);
         assert!(text.ends_with("https://x.com/user/status/original_tweet_id"));
         assert!(text.starts_with("alpha"));
+        assert!(text.contains("...\n\n"));
+    }
+
+    #[test]
+    fn test_new_post_truncates_multibyte_text_by_character_count() {
+        let post = RenderedPost {
+            text: "é ".repeat(80),
+            source_post_id: "original_tweet_id".to_string(),
+            source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+        };
+
+        let text = format_new_post_text(&post, 64);
+
+        assert!(text.chars().count() <= 64);
+        assert!(text.ends_with("https://x.com/user/status/original_tweet_id"));
         assert!(text.contains("...\n\n"));
     }
 
@@ -377,6 +386,44 @@ mod tests {
         let result = publisher.publish(&sample_post()).await;
 
         assert!(matches!(result, Err(PublishError::ContentTooLong { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_publish_length_guard_counts_characters_not_bytes() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/2/tweets"))
+            .and(body_json(serde_json::json!({
+                "text": "ééééé",
+                "reply": {
+                    "in_reply_to_tweet_id": "original_tweet_id"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "new_tweet_id"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let publisher = XPublisher::with_base_url(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            XPublishMode::Reply,
+            5,
+            true,
+        );
+        let post = RenderedPost {
+            text: "ééééé".to_string(),
+            source_post_id: "original_tweet_id".to_string(),
+            source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+        };
+
+        let result = publisher.publish(&post).await.unwrap();
+
+        assert_eq!(result.id.as_deref(), Some("new_tweet_id"));
     }
 
     #[tokio::test]

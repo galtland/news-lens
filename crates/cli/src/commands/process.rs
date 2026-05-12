@@ -90,8 +90,6 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
                 dry_run: outbox_dry_run,
                 wiki_path: config.wiki.path.clone(),
                 lens,
-                rate_limit_per_minute: None,
-                rate_limit_per_hour: None,
             },
         );
         let results = run_loop.process_posts(posts).await?;
@@ -134,10 +132,10 @@ async fn resolve_single_post(
                         );
                     }
                     Err(error) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             error = %error,
                             post_arg = %value,
-                            "Source post lookup failed; treating --post value as ad-hoc text"
+                            "Source post lookup failed; treating --post value as ad-hoc text. Pass --text to skip lookup"
                         );
                     }
                 }

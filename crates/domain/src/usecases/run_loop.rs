@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use regex::Regex;
-use tokio::sync::Mutex;
-use tokio::time::{Duration, Instant, sleep};
 
 use crate::{
     compare_post_ids,
@@ -28,8 +26,6 @@ pub struct RunLoopConfig {
     pub dry_run: bool,
     pub wiki_path: std::path::PathBuf,
     pub lens: Lens,
-    pub rate_limit_per_minute: Option<u32>,
-    pub rate_limit_per_hour: Option<u32>,
 }
 
 impl Default for RunLoopConfig {
@@ -48,8 +44,6 @@ impl Default for RunLoopConfig {
                 path: std::path::PathBuf::new(),
                 content: String::new(),
             },
-            rate_limit_per_minute: None,
-            rate_limit_per_hour: None,
         }
     }
 }
@@ -73,7 +67,6 @@ where
     clock: Arc<Cl>,
     config: RunLoopConfig,
     ignore_patterns: Vec<Regex>,
-    rate_limiter: Arc<RateLimiter>,
 }
 
 impl<S, H, X, N, St, Cl> RunLoop<S, H, X, N, St, Cl>
@@ -96,10 +89,6 @@ where
         config: RunLoopConfig,
     ) -> Self {
         let ignore_patterns = compile_ignore_patterns(&config.ignore_patterns);
-        let rate_limiter = Arc::new(RateLimiter::new(
-            config.rate_limit_per_minute,
-            config.rate_limit_per_hour,
-        ));
 
         Self {
             post_source,
@@ -110,7 +99,6 @@ where
             clock,
             config,
             ignore_patterns,
-            rate_limiter,
         }
     }
 
@@ -141,7 +129,6 @@ where
     ) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
         let mut results = Vec::new();
         for post in self.filter_posts(posts) {
-            self.rate_limiter.acquire().await;
             let post_id = post.id.clone();
             let result = self.process_post(&post).await?;
             results.push((post_id, result));
@@ -180,7 +167,6 @@ where
         let mut results = Vec::new();
 
         for post in filtered_posts {
-            self.rate_limiter.acquire().await;
             let post_id = post.id.clone();
             let result = self.process_post(&post).await?;
             results.push((post_id, result));
@@ -278,6 +264,8 @@ where
                     "[DRY RUN] Would publish commentary"
                 );
             } else if should_publish {
+                // Record before publishing so a successful outbox/publish action is not retried
+                // if the later platform-ID update fails.
                 self.record_agent_return(post, &agent_return, None, None)
                     .await
                     .map_err(state_error)?;
@@ -398,86 +386,6 @@ pub enum RunLoopError {
 
 fn state_error(error: StateError) -> RunLoopError {
     RunLoopError::State(error.to_string())
-}
-
-#[derive(Debug)]
-struct RateLimiter {
-    per_minute: Option<u32>,
-    per_hour: Option<u32>,
-    state: Mutex<RateLimiterState>,
-}
-
-#[derive(Debug)]
-struct RateLimiterState {
-    minute_window_start: Instant,
-    hour_window_start: Instant,
-    minute_count: u32,
-    hour_count: u32,
-}
-
-impl RateLimiter {
-    fn new(per_minute: Option<u32>, per_hour: Option<u32>) -> Self {
-        let now = Instant::now();
-        Self {
-            per_minute,
-            per_hour,
-            state: Mutex::new(RateLimiterState {
-                minute_window_start: now,
-                hour_window_start: now,
-                minute_count: 0,
-                hour_count: 0,
-            }),
-        }
-    }
-
-    async fn acquire(&self) {
-        if self.per_minute.is_none() && self.per_hour.is_none() {
-            return;
-        }
-
-        loop {
-            let mut state = self.state.lock().await;
-            let now = Instant::now();
-
-            if now.duration_since(state.minute_window_start) >= Duration::from_secs(60) {
-                state.minute_window_start = now;
-                state.minute_count = 0;
-            }
-
-            if now.duration_since(state.hour_window_start) >= Duration::from_secs(3600) {
-                state.hour_window_start = now;
-                state.hour_count = 0;
-            }
-
-            let mut wait_for = Duration::from_secs(0);
-            if let Some(limit) = self.per_minute {
-                if state.minute_count >= limit {
-                    let elapsed = now.duration_since(state.minute_window_start);
-                    wait_for = wait_for.max(Duration::from_secs(60).saturating_sub(elapsed));
-                }
-            }
-
-            if let Some(limit) = self.per_hour {
-                if state.hour_count >= limit {
-                    let elapsed = now.duration_since(state.hour_window_start);
-                    wait_for = wait_for.max(Duration::from_secs(3600).saturating_sub(elapsed));
-                }
-            }
-
-            if wait_for.is_zero() {
-                if self.per_minute.is_some() {
-                    state.minute_count = state.minute_count.saturating_add(1);
-                }
-                if self.per_hour.is_some() {
-                    state.hour_count = state.hour_count.saturating_add(1);
-                }
-                return;
-            }
-
-            drop(state);
-            sleep(wait_for).await;
-        }
-    }
 }
 
 fn compile_ignore_patterns(patterns: &[String]) -> Vec<Regex> {

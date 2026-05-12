@@ -61,8 +61,6 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
             dry_run,
             wiki_path: config.wiki.path.clone(),
             lens,
-            rate_limit_per_minute: None,
-            rate_limit_per_hour: None,
         },
     );
 
