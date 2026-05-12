@@ -97,7 +97,7 @@ fn validate_template(template: &str) -> Result<(), HarnessError> {
     while let Some(start) = rest.find("{{") {
         let token_start = &rest[start..];
         let Some(end) = token_start.find("}}") else {
-            return Ok(());
+            return Err(unterminated_template_token(token_start));
         };
 
         let token = &token_start[..end + 2];
@@ -118,8 +118,7 @@ fn render_template(template: &str, substitutions: &[(&str, &str)]) -> Result<Str
         rendered.push_str(&rest[..start]);
         let token_start = &rest[start..];
         let Some(end) = token_start.find("}}") else {
-            rendered.push_str(token_start);
-            return Ok(rendered);
+            return Err(unterminated_template_token(token_start));
         };
 
         let token = &token_start[..end + 2];
@@ -139,8 +138,17 @@ fn render_template(template: &str, substitutions: &[(&str, &str)]) -> Result<Str
 }
 
 fn unknown_template_token(token: &str) -> HarnessError {
-    let token_name = token.trim_start_matches("{{").trim_end_matches("}}").trim();
+    let token_name = template_token_name(token);
     HarnessError::InvalidTemplate(format!("unknown template token: {}", token_name))
+}
+
+fn unterminated_template_token(token: &str) -> HarnessError {
+    let token_name = template_token_name(token);
+    HarnessError::InvalidTemplate(format!("unterminated template token: {}", token_name))
+}
+
+fn template_token_name(token: &str) -> &str {
+    token.trim_start_matches("{{").trim_end_matches("}}").trim()
 }
 
 #[async_trait]
@@ -342,6 +350,25 @@ mod tests {
 
         assert!(
             matches!(error, HarnessError::InvalidTemplate(message) if message.contains("POST_HEADLINE"))
+        );
+    }
+
+    #[test]
+    fn harness_rejects_unterminated_prompt_token_at_construction() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "Post: {{POST_TEXT\n").expect("prompt");
+
+        let error = SubprocessHarness::new(HarnessConfig {
+            command: "true".to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+        })
+        .expect_err("invalid prompt");
+
+        assert!(
+            matches!(error, HarnessError::InvalidTemplate(message) if message.contains("unterminated template token: POST_TEXT"))
         );
     }
 
@@ -596,6 +623,16 @@ exit 7
 
         assert!(
             matches!(error, HarnessError::InvalidTemplate(message) if message.contains("POST_HEADLINE"))
+        );
+    }
+
+    #[test]
+    fn render_template_rejects_unterminated_token() {
+        let error = render_template("Post: {{POST_TEXT\n", &[("{{POST_TEXT}}", "hello")])
+            .expect_err("unterminated token");
+
+        assert!(
+            matches!(error, HarnessError::InvalidTemplate(message) if message.contains("unterminated template token: POST_TEXT"))
         );
     }
 
