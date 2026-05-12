@@ -70,11 +70,11 @@ impl SubprocessHarness {
             ("{{CANDIDATE_SLUG}}", ctx.candidate_slug.as_str()),
         ];
 
-        Ok(render_template(&self.prompt_template, &substitutions))
+        render_template(&self.prompt_template, &substitutions)
     }
 }
 
-fn render_template(template: &str, substitutions: &[(&str, &str)]) -> String {
+fn render_template(template: &str, substitutions: &[(&str, &str)]) -> Result<String, HarnessError> {
     let mut rendered = String::with_capacity(template.len());
     let mut rest = template;
 
@@ -83,7 +83,7 @@ fn render_template(template: &str, substitutions: &[(&str, &str)]) -> String {
         let token_start = &rest[start..];
         let Some(end) = token_start.find("}}") else {
             rendered.push_str(token_start);
-            return rendered;
+            return Ok(rendered);
         };
 
         let token = &token_start[..end + 2];
@@ -93,13 +93,17 @@ fn render_template(template: &str, substitutions: &[(&str, &str)]) -> String {
         {
             rendered.push_str(replacement);
         } else {
-            rendered.push_str(token);
+            let token_name = token.trim_start_matches("{{").trim_end_matches("}}").trim();
+            return Err(HarnessError::InvalidResponse(format!(
+                "unknown template token: {}",
+                token_name
+            )));
         }
         rest = &token_start[end + 2..];
     }
 
     rendered.push_str(rest);
-    rendered
+    Ok(rendered)
 }
 
 #[async_trait]
@@ -523,9 +527,20 @@ exit 7
                 ("{{POST_TEXT}}", "literal {{WIKI_PATH}}"),
                 ("{{WIKI_PATH}}", "/tmp/wiki"),
             ],
-        );
+        )
+        .expect("rendered");
 
         assert_eq!(rendered, "Post: literal {{WIKI_PATH}}\nWiki: /tmp/wiki\n");
+    }
+
+    #[test]
+    fn render_template_rejects_unknown_token() {
+        let error = render_template("Post: {{POST_HEADLINE}}\n", &[("{{POST_TEXT}}", "hello")])
+            .expect_err("unknown token");
+
+        assert!(
+            matches!(error, HarnessError::InvalidResponse(message) if message.contains("POST_HEADLINE"))
+        );
     }
 
     #[test]
