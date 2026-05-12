@@ -1,26 +1,22 @@
-//! In-memory state store for testing and offline mode
+//! In-memory state store for testing and offline mode.
 
 use async_trait::async_trait;
-use news_tagger_domain::{AccountState, PublishedRecord, StateError, StateStore};
+use news_lens_domain::{AccountState, ProcessedPostRecord, StateError, StateStore};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// In-memory state store implementation
+/// In-memory state store implementation.
 pub struct InMemoryStateStore {
     accounts: RwLock<HashMap<String, AccountState>>,
-    published: RwLock<HashMap<String, PublishedRecord>>,
+    processed: RwLock<HashMap<String, ProcessedPostRecord>>,
 }
 
 impl InMemoryStateStore {
     pub fn new() -> Self {
         Self {
             accounts: RwLock::new(HashMap::new()),
-            published: RwLock::new(HashMap::new()),
+            processed: RwLock::new(HashMap::new()),
         }
-    }
-
-    fn make_published_key(source_post_id: &str, taxonomy_hash: &str) -> String {
-        format!("{}:{}", source_post_id, taxonomy_hash)
     }
 }
 
@@ -36,7 +32,7 @@ impl StateStore for InMemoryStateStore {
         let accounts = self
             .accounts
             .read()
-            .map_err(|e| StateError::Database(e.to_string()))?;
+            .map_err(|error| StateError::Database(error.to_string()))?;
         Ok(accounts.get(account).cloned())
     }
 
@@ -44,56 +40,51 @@ impl StateStore for InMemoryStateStore {
         let mut accounts = self
             .accounts
             .write()
-            .map_err(|e| StateError::Database(e.to_string()))?;
+            .map_err(|error| StateError::Database(error.to_string()))?;
         accounts.insert(state.account.clone(), state.clone());
         Ok(())
     }
 
-    async fn is_processed(
-        &self,
-        source_post_id: &str,
-        taxonomy_hash: &str,
-    ) -> Result<bool, StateError> {
-        let key = Self::make_published_key(source_post_id, taxonomy_hash);
-        let published = self
-            .published
+    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
+        let processed = self
+            .processed
             .read()
-            .map_err(|e| StateError::Database(e.to_string()))?;
-        Ok(published.contains_key(&key))
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(processed
+            .get(post_id)
+            .map(|record| record.lens_id == lens_id)
+            .unwrap_or(false))
     }
 
-    async fn record_published(&self, record: &PublishedRecord) -> Result<(), StateError> {
-        let key = Self::make_published_key(&record.source_post_id, &record.taxonomy_hash);
-        let mut published = self
-            .published
+    async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
+        let mut processed = self
+            .processed
             .write()
-            .map_err(|e| StateError::Database(e.to_string()))?;
-        published.insert(key, record.clone());
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        processed.insert(record.post_id.clone(), record.clone());
         Ok(())
     }
 
-    async fn get_published(
+    async fn get_processed(
         &self,
-        source_post_id: &str,
-        taxonomy_hash: &str,
-    ) -> Result<Option<PublishedRecord>, StateError> {
-        let key = Self::make_published_key(source_post_id, taxonomy_hash);
-        let published = self
-            .published
+        post_id: &str,
+    ) -> Result<Option<ProcessedPostRecord>, StateError> {
+        let processed = self
+            .processed
             .read()
-            .map_err(|e| StateError::Database(e.to_string()))?;
-        Ok(published.get(&key).cloned())
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(processed.get(post_id).cloned())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use news_lens_domain::Stance;
     use time::OffsetDateTime;
-    use uuid::Uuid;
 
     #[tokio::test]
-    async fn test_account_state_roundtrip() {
+    async fn account_state_roundtrip() {
         let store = InMemoryStateStore::new();
 
         let state = AccountState {
@@ -110,55 +101,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_nonexistent_account() {
+    async fn processed_record_roundtrip() {
         let store = InMemoryStateStore::new();
-        let result = store.get_account_state("nonexistent").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_published_record_roundtrip() {
-        let store = InMemoryStateStore::new();
-
-        let record = PublishedRecord {
-            id: Uuid::new_v4(),
-            source_post_id: "post123".to_string(),
-            taxonomy_hash: "hash456".to_string(),
+        let record = ProcessedPostRecord {
+            post_id: "post123".to_string(),
+            lens_id: "lens".to_string(),
+            processed_at: OffsetDateTime::now_utc(),
+            stance: Stance::Critique,
+            raw_path: Some("raw/news/post.md".to_string()),
+            thesis_slug: Some("post".to_string()),
             x_post_id: Some("xpost789".to_string()),
             nostr_event_id: None,
-            published_at: OffsetDateTime::now_utc(),
         };
 
-        store.record_published(&record).await.unwrap();
+        store.record_processed(&record).await.unwrap();
 
-        let is_processed = store.is_processed("post123", "hash456").await.unwrap();
-        assert!(is_processed);
+        assert!(store.is_processed("post123", "lens").await.unwrap());
+        assert!(!store.is_processed("post123", "other").await.unwrap());
 
-        let retrieved = store.get_published("post123", "hash456").await.unwrap();
-        assert!(retrieved.is_some());
+        let retrieved = store.get_processed("post123").await.unwrap();
         assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_not_processed_with_different_hash() {
-        let store = InMemoryStateStore::new();
-
-        let record = PublishedRecord {
-            id: Uuid::new_v4(),
-            source_post_id: "post123".to_string(),
-            taxonomy_hash: "hash456".to_string(),
-            x_post_id: None,
-            nostr_event_id: None,
-            published_at: OffsetDateTime::now_utc(),
-        };
-
-        store.record_published(&record).await.unwrap();
-
-        // Same post but different taxonomy hash should not be processed
-        let is_processed = store
-            .is_processed("post123", "different_hash")
-            .await
-            .unwrap();
-        assert!(!is_processed);
     }
 }

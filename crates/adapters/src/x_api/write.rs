@@ -1,7 +1,7 @@
 //! X API write adapter for publishing posts
 
 use async_trait::async_trait;
-use news_tagger_domain::{PublishError, PublishResult, Publisher, RenderedPost, XPublishMode};
+use news_lens_domain::{PublishError, PublishResult, Publisher, RenderedPost, XPublishMode};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

@@ -1,27 +1,20 @@
-//! news-tagger adapters crate
+//! news-lens adapters crate
 //!
 //! This crate contains infrastructure adapters implementing the domain ports:
-//! - `definitions`: Filesystem-based definitions loader
 //! - `state`: SQLite and in-memory state stores
-//! - `llm`: LLM provider adapters (OpenAI, Anthropic, etc.)
 //! - `x`: X (Twitter) API adapters
 //! - `nostr`: Nostr publishing adapter
 //! - `jsonl_source`: JSONL file-based post source
 
-mod definitions_fs;
+pub mod harness;
 mod jsonl_source;
+pub mod lens;
 pub mod outbox;
 mod state_memory;
 mod state_sqlite;
 
-pub mod llm;
 pub mod nostr;
 pub mod x_api;
-
-/// Re-exports for definitions adapters
-pub mod definitions {
-    pub use crate::definitions_fs::FsDefinitionsRepo as FilesystemDefinitionsRepo;
-}
 
 /// Re-exports for state adapters
 pub mod state {

@@ -1,5 +1,5 @@
 {
-  description = "news-tagger - CLI tool for classifying posts using LLM-powered narrative tagging";
+  description = "news-lens - CLI tool for classifying posts using LLM-powered narrative tagging";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -64,7 +64,7 @@
         };
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "news-tagger";
+          pname = "news-lens";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;

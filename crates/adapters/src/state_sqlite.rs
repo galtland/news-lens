@@ -1,26 +1,24 @@
-//! SQLite state store implementation
+//! SQLite state store implementation.
 
 use async_trait::async_trait;
-use news_tagger_domain::{AccountState, PublishedRecord, StateError, StateStore};
+use news_lens_domain::{AccountState, ProcessedPostRecord, StateError, StateStore};
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use std::path::Path;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
-/// SQLite-backed state store
+/// SQLite-backed state store.
 pub struct SqliteStateStore {
     pool: SqlitePool,
 }
 
 impl SqliteStateStore {
-    /// Create a new SQLite state store, initializing the database if needed
+    /// Create a new SQLite state store, initializing the database if needed.
     pub async fn new(db_path: impl AsRef<Path>) -> Result<Self, StateError> {
         let db_path = db_path.as_ref();
 
-        // Create parent directories if needed
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| StateError::Database(format!("Failed to create directory: {}", e)))?;
+                .map_err(|error| StateError::Database(error.to_string()))?;
         }
 
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
@@ -29,7 +27,7 @@ impl SqliteStateStore {
             .max_connections(5)
             .connect(&db_url)
             .await
-            .map_err(|e| StateError::Database(e.to_string()))?;
+            .map_err(|error| StateError::Database(error.to_string()))?;
 
         let store = Self { pool };
         store.run_migrations().await?;
@@ -37,13 +35,13 @@ impl SqliteStateStore {
         Ok(store)
     }
 
-    /// Create an in-memory SQLite store (for testing)
+    /// Create an in-memory SQLite store for tests.
     pub async fn in_memory() -> Result<Self, StateError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
-            .map_err(|e| StateError::Database(e.to_string()))?;
+            .map_err(|error| StateError::Database(error.to_string()))?;
 
         let store = Self { pool };
         store.run_migrations().await?;
@@ -52,49 +50,49 @@ impl SqliteStateStore {
     }
 
     async fn run_migrations(&self) -> Result<(), StateError> {
-        // Create tables
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS processed_posts (
+                post_id        TEXT PRIMARY KEY,
+                lens_id        TEXT NOT NULL,
+                processed_at   TEXT NOT NULL,
+                stance         TEXT NOT NULL,
+                raw_path       TEXT,
+                thesis_slug    TEXT,
+                x_post_id      TEXT,
+                nostr_event_id TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StateError::Database(error.to_string()))?;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS account_state (
-                account TEXT PRIMARY KEY,
-                since_id TEXT,
+                account    TEXT PRIMARY KEY,
+                since_id   TEXT,
                 updated_at TEXT NOT NULL
             )
             "#,
         )
         .execute(&self.pool)
         .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS published_records (
-                id TEXT PRIMARY KEY,
-                source_post_id TEXT NOT NULL,
-                taxonomy_hash TEXT NOT NULL,
-                x_post_id TEXT,
-                nostr_event_id TEXT,
-                published_at TEXT NOT NULL,
-                UNIQUE(source_post_id, taxonomy_hash)
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
-
-        // Create index for lookups
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_published_lookup
-            ON published_records(source_post_id, taxonomy_hash)
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn table_columns(&self, table: &str) -> Result<Vec<String>, StateError> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info(?) ORDER BY cid")
+                .bind(table)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 }
 
@@ -107,31 +105,20 @@ impl StateStore for SqliteStateStore {
         .bind(account)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         match row {
-            Some((account, since_id, updated_at_str)) => {
-                let updated_at = OffsetDateTime::parse(
-                    &updated_at_str,
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .map_err(|e| StateError::Serialization(e.to_string()))?;
-
-                Ok(Some(AccountState {
-                    account,
-                    since_id,
-                    updated_at,
-                }))
-            }
+            Some((account, since_id, updated_at)) => Ok(Some(AccountState {
+                account,
+                since_id,
+                updated_at: parse_time(&updated_at)?,
+            })),
             None => Ok(None),
         }
     }
 
     async fn set_account_state(&self, state: &AccountState) -> Result<(), StateError> {
-        let updated_at_str = state
-            .updated_at
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| StateError::Serialization(e.to_string()))?;
+        let updated_at = format_time(state.updated_at)?;
 
         sqlx::query(
             r#"
@@ -144,123 +131,133 @@ impl StateStore for SqliteStateStore {
         )
         .bind(&state.account)
         .bind(&state.since_id)
-        .bind(&updated_at_str)
+        .bind(&updated_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(())
     }
 
-    async fn is_processed(
-        &self,
-        source_post_id: &str,
-        taxonomy_hash: &str,
-    ) -> Result<bool, StateError> {
+    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
         let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM published_records WHERE source_post_id = ? AND taxonomy_hash = ?",
+            "SELECT COUNT(*) FROM processed_posts WHERE post_id = ? AND lens_id = ?",
         )
-        .bind(source_post_id)
-        .bind(taxonomy_hash)
+        .bind(post_id)
+        .bind(lens_id)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(count.0 > 0)
     }
 
-    async fn record_published(&self, record: &PublishedRecord) -> Result<(), StateError> {
-        let published_at_str = record
-            .published_at
-            .format(&time::format_description::well_known::Rfc3339)
-            .map_err(|e| StateError::Serialization(e.to_string()))?;
+    async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
+        let processed_at = format_time(record.processed_at)?;
 
         sqlx::query(
             r#"
-            INSERT INTO published_records
-            (id, source_post_id, taxonomy_hash, x_post_id, nostr_event_id, published_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_post_id, taxonomy_hash) DO UPDATE SET
-                x_post_id = COALESCE(excluded.x_post_id, published_records.x_post_id),
-                nostr_event_id = COALESCE(excluded.nostr_event_id, published_records.nostr_event_id)
+            INSERT INTO processed_posts
+            (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+                lens_id = excluded.lens_id,
+                processed_at = excluded.processed_at,
+                stance = excluded.stance,
+                raw_path = excluded.raw_path,
+                thesis_slug = excluded.thesis_slug,
+                x_post_id = excluded.x_post_id,
+                nostr_event_id = excluded.nostr_event_id
             "#,
         )
-        .bind(record.id.to_string())
-        .bind(&record.source_post_id)
-        .bind(&record.taxonomy_hash)
+        .bind(&record.post_id)
+        .bind(&record.lens_id)
+        .bind(&processed_at)
+        .bind(record.stance.as_str())
+        .bind(&record.raw_path)
+        .bind(&record.thesis_slug)
         .bind(&record.x_post_id)
         .bind(&record.nostr_event_id)
-        .bind(&published_at_str)
         .execute(&self.pool)
         .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(())
     }
 
-    async fn get_published(
+    async fn get_processed(
         &self,
-        source_post_id: &str,
-        taxonomy_hash: &str,
-    ) -> Result<Option<PublishedRecord>, StateError> {
+        post_id: &str,
+    ) -> Result<Option<ProcessedPostRecord>, StateError> {
         let row: Option<(
             String,
             String,
             String,
-            Option<String>,
-            Option<String>,
             String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
         )> = sqlx::query_as(
             r#"
-                SELECT id, source_post_id, taxonomy_hash, x_post_id, nostr_event_id, published_at
-                FROM published_records
-                WHERE source_post_id = ? AND taxonomy_hash = ?
-                "#,
+            SELECT post_id, lens_id, processed_at, stance, raw_path, thesis_slug,
+                   x_post_id, nostr_event_id
+            FROM processed_posts
+            WHERE post_id = ?
+            "#,
         )
-        .bind(source_post_id)
-        .bind(taxonomy_hash)
+        .bind(post_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| StateError::Database(e.to_string()))?;
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         match row {
             Some((
-                id,
-                source_post_id,
-                taxonomy_hash,
+                post_id,
+                lens_id,
+                processed_at,
+                stance,
+                raw_path,
+                thesis_slug,
                 x_post_id,
                 nostr_event_id,
-                published_at_str,
-            )) => {
-                let id =
-                    Uuid::parse_str(&id).map_err(|e| StateError::Serialization(e.to_string()))?;
-
-                let published_at = OffsetDateTime::parse(
-                    &published_at_str,
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .map_err(|e| StateError::Serialization(e.to_string()))?;
-
-                Ok(Some(PublishedRecord {
-                    id,
-                    source_post_id,
-                    taxonomy_hash,
-                    x_post_id,
-                    nostr_event_id,
-                    published_at,
-                }))
-            }
+            )) => Ok(Some(ProcessedPostRecord {
+                post_id,
+                lens_id,
+                processed_at: parse_time(&processed_at)?,
+                stance: stance.parse().map_err(
+                    |error: news_lens_domain::AgentValidationError| {
+                        StateError::Serialization(error.to_string())
+                    },
+                )?,
+                raw_path,
+                thesis_slug,
+                x_post_id,
+                nostr_event_id,
+            })),
             None => Ok(None),
         }
     }
 }
 
+fn format_time(value: OffsetDateTime) -> Result<String, StateError> {
+    value
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| StateError::Serialization(error.to_string()))
+}
+
+fn parse_time(value: &str) -> Result<OffsetDateTime, StateError> {
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .map_err(|error| StateError::Serialization(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use news_lens_domain::Stance;
 
     #[tokio::test]
-    async fn test_account_state_roundtrip() {
+    async fn account_state_roundtrip() {
         let store = SqliteStateStore::in_memory().await.unwrap();
 
         let state = AccountState {
@@ -277,47 +274,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_published_record_roundtrip() {
+    async fn processed_record_roundtrip() {
         let store = SqliteStateStore::in_memory().await.unwrap();
 
-        let record = PublishedRecord {
-            id: Uuid::new_v4(),
-            source_post_id: "post123".to_string(),
-            taxonomy_hash: "hash456".to_string(),
+        let record = ProcessedPostRecord {
+            post_id: "post123".to_string(),
+            lens_id: "lens".to_string(),
+            processed_at: OffsetDateTime::now_utc(),
+            stance: Stance::Critique,
+            raw_path: Some("raw/news/post.md".to_string()),
+            thesis_slug: Some("post".to_string()),
             x_post_id: Some("xpost789".to_string()),
             nostr_event_id: None,
-            published_at: OffsetDateTime::now_utc(),
         };
 
-        store.record_published(&record).await.unwrap();
+        store.record_processed(&record).await.unwrap();
 
-        let is_processed = store.is_processed("post123", "hash456").await.unwrap();
-        assert!(is_processed);
+        assert!(store.is_processed("post123", "lens").await.unwrap());
+        assert!(!store.is_processed("post123", "other").await.unwrap());
 
-        let retrieved = store.get_published("post123", "hash456").await.unwrap();
-        assert!(retrieved.is_some());
+        let retrieved = store.get_processed("post123").await.unwrap();
         assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));
     }
 
     #[tokio::test]
-    async fn test_upsert_account_state() {
+    async fn migration_matches_spec_schema() {
         let store = SqliteStateStore::in_memory().await.unwrap();
 
-        let state1 = AccountState {
-            account: "testuser".to_string(),
-            since_id: Some("111".to_string()),
-            updated_at: OffsetDateTime::now_utc(),
-        };
-        store.set_account_state(&state1).await.unwrap();
-
-        let state2 = AccountState {
-            account: "testuser".to_string(),
-            since_id: Some("222".to_string()),
-            updated_at: OffsetDateTime::now_utc(),
-        };
-        store.set_account_state(&state2).await.unwrap();
-
-        let retrieved = store.get_account_state("testuser").await.unwrap().unwrap();
-        assert_eq!(retrieved.since_id, Some("222".to_string()));
+        let processed = store.table_columns("processed_posts").await.unwrap();
+        assert_eq!(
+            processed,
+            vec![
+                "post_id",
+                "lens_id",
+                "processed_at",
+                "stance",
+                "raw_path",
+                "thesis_slug",
+                "x_post_id",
+                "nostr_event_id"
+            ]
+        );
+        assert!(!processed.iter().any(|column| column == "taxonomy_hash"));
+        assert!(!processed.iter().any(|column| column == "cost_usd"));
     }
 }

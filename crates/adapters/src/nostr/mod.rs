@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use bech32::Hrp;
 use k256::schnorr::SigningKey;
-use news_tagger_domain::{PublishError, PublishResult, Publisher, RenderedPost};
+use news_lens_domain::{PublishError, PublishResult, Publisher, RenderedPost};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

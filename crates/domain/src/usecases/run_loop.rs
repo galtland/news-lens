@@ -1,45 +1,34 @@
-//! Run loop use case - orchestrates watching, classifying, and publishing
+//! Serial run loop use case.
 
 use std::sync::Arc;
-use uuid::Uuid;
 
-use crate::{
-    model::{AccountState, ProcessResult, PublishedRecord, SourcePost, Taxonomy},
-    ports::{Classifier, ClassifyError, Clock, DefinitionsRepo, PostSource, Publisher, StateStore},
-    usecases::{
-        classify::{ClassifyConfig, ClassifyUseCase},
-        render::{RenderConfig, Renderer},
-    },
-};
-use futures::future::BoxFuture;
-use futures::stream::{FuturesUnordered, StreamExt};
+use async_trait::async_trait;
 use regex::Regex;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, sleep};
 
-/// Configuration for the run loop
+use crate::{
+    model::{
+        AccountState, AgentReturn, Lens, PostContext, ProcessResult, ProcessedPostRecord,
+        RenderedPost, SourcePost, Stance,
+    },
+    ports::{
+        Clock, Harness, HarnessError, PostSource, Publisher, StateError, StateStore, SystemClock,
+    },
+};
+
+/// Configuration for the run loop.
 #[derive(Debug, Clone)]
 pub struct RunLoopConfig {
-    /// Accounts to watch
     pub accounts: Vec<String>,
-    /// Whether to include replies
     pub include_replies: bool,
-    /// Whether to include reposts
     pub include_reposts: bool,
-    /// Regex patterns for posts to ignore
     pub ignore_patterns: Vec<String>,
-    /// Dry run mode (don't actually publish)
     pub dry_run: bool,
-    /// Maximum concurrent post processing tasks
-    pub max_concurrent: usize,
-    /// Max posts processed per minute (None = unlimited)
+    pub wiki_path: std::path::PathBuf,
+    pub lens: Lens,
     pub rate_limit_per_minute: Option<u32>,
-    /// Max posts processed per hour (None = unlimited)
     pub rate_limit_per_hour: Option<u32>,
-    /// Classification config
-    pub classify_config: ClassifyConfig,
-    /// Render config
-    pub render_config: RenderConfig,
 }
 
 impl Default for RunLoopConfig {
@@ -50,30 +39,33 @@ impl Default for RunLoopConfig {
             include_reposts: false,
             ignore_patterns: vec![],
             dry_run: true,
-            max_concurrent: 4,
+            wiki_path: std::path::PathBuf::new(),
+            lens: Lens {
+                id: String::new(),
+                voice: None,
+                register: None,
+                path: std::path::PathBuf::new(),
+                content: String::new(),
+            },
             rate_limit_per_minute: None,
             rate_limit_per_hour: None,
-            classify_config: ClassifyConfig::default(),
-            render_config: RenderConfig::default(),
         }
     }
 }
 
-/// Run loop orchestrator
+/// Run loop orchestrator.
 #[derive(Clone)]
-pub struct RunLoop<S, D, C, X, N, St, Cl>
+pub struct RunLoop<S, H, X, N, St, Cl = SystemClock>
 where
     S: PostSource + ?Sized,
-    D: DefinitionsRepo + ?Sized,
-    C: Classifier + ?Sized,
+    H: Harness + ?Sized,
     X: Publisher + ?Sized,
     N: Publisher + ?Sized,
     St: StateStore + ?Sized,
     Cl: Clock + ?Sized,
 {
     post_source: Arc<S>,
-    definitions_repo: Arc<D>,
-    classifier: Arc<C>,
+    harness: Arc<H>,
     x_publisher: Arc<X>,
     nostr_publisher: Arc<N>,
     state_store: Arc<St>,
@@ -83,11 +75,10 @@ where
     rate_limiter: Arc<RateLimiter>,
 }
 
-impl<S, D, C, X, N, St, Cl> RunLoop<S, D, C, X, N, St, Cl>
+impl<S, H, X, N, St, Cl> RunLoop<S, H, X, N, St, Cl>
 where
     S: PostSource + ?Sized,
-    D: DefinitionsRepo + ?Sized,
-    C: Classifier + ?Sized,
+    H: Harness + ?Sized,
     X: Publisher + ?Sized,
     N: Publisher + ?Sized,
     St: StateStore + ?Sized,
@@ -96,8 +87,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         post_source: Arc<S>,
-        definitions_repo: Arc<D>,
-        classifier: Arc<C>,
+        harness: Arc<H>,
         x_publisher: Arc<X>,
         nostr_publisher: Arc<N>,
         state_store: Arc<St>,
@@ -109,10 +99,10 @@ where
             config.rate_limit_per_minute,
             config.rate_limit_per_hour,
         ));
+
         Self {
             post_source,
-            definitions_repo,
-            classifier,
+            harness,
             x_publisher,
             nostr_publisher,
             state_store,
@@ -123,31 +113,15 @@ where
         }
     }
 
-    /// Run a single poll cycle for all accounts
+    /// Run a single poll cycle for all configured accounts.
     pub async fn poll_once(&self) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
-        // Load definitions
-        let definitions = self
-            .definitions_repo
-            .load()
-            .await
-            .map_err(|e| RunLoopError::Definitions(e.to_string()))?;
-
-        let taxonomy = Arc::new(Taxonomy::new(definitions));
-
-        tracing::info!(
-            taxonomy_hash = %taxonomy.hash,
-            definition_count = taxonomy.definitions.len(),
-            "Loaded taxonomy"
-        );
-
         let mut results = Vec::new();
 
         for account in &self.config.accounts {
-            match self.poll_account(account, Arc::clone(&taxonomy)).await {
+            match self.poll_account(account).await {
                 Ok(account_results) => results.extend(account_results),
-                Err(e) => {
-                    tracing::error!(account = %account, error = %e, "Failed to poll account");
-                    // Continue with other accounts
+                Err(error) => {
+                    tracing::error!(account = %account, error = %error, "Failed to poll account");
                 }
             }
         }
@@ -155,88 +129,55 @@ where
         Ok(results)
     }
 
-    /// Poll a single account
+    /// Process posts already supplied by a caller, used by `process --jsonl`.
+    pub async fn process_posts(
+        &self,
+        posts: Vec<SourcePost>,
+    ) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
+        let mut results = Vec::new();
+        for post in self.filter_posts(posts) {
+            self.rate_limiter.acquire().await;
+            let post_id = post.id.clone();
+            let result = self.process_post(&post).await;
+            results.push((post_id, result));
+        }
+        Ok(results)
+    }
+
     async fn poll_account(
         &self,
         account: &str,
-        taxonomy: Arc<Taxonomy>,
     ) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
-        // Get last processed ID
         let account_state = self
             .state_store
             .get_account_state(account)
             .await
-            .map_err(|e| RunLoopError::State(e.to_string()))?;
+            .map_err(|error| RunLoopError::State(error.to_string()))?;
 
-        let since_id = account_state.as_ref().and_then(|s| s.since_id.as_deref());
+        let since_id = account_state
+            .as_ref()
+            .and_then(|state| state.since_id.as_deref());
 
-        tracing::info!(
-            account = %account,
-            since_id = ?since_id,
-            "Fetching posts"
-        );
+        tracing::info!(account = %account, since_id = ?since_id, "Fetching posts");
 
-        // Fetch new posts
         let posts = self
             .post_source
             .fetch_posts(account, since_id)
             .await
-            .map_err(|e| RunLoopError::PostSource(e.to_string()))?;
+            .map_err(|error| RunLoopError::PostSource(error.to_string()))?;
 
-        if posts.is_empty() {
-            tracing::debug!(account = %account, "No new posts");
-            return Ok(vec![]);
-        }
-
-        tracing::info!(account = %account, count = posts.len(), "Fetched posts");
-
-        // Filter posts
         let filtered_posts = self.filter_posts(posts);
-
-        if filtered_posts.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Process each post with bounded concurrency and rate limiting
         let mut results = Vec::new();
         let mut last_id = since_id.map(String::from);
-        let max_concurrent = self.config.max_concurrent.max(1);
-        let mut tasks: FuturesUnordered<BoxFuture<'_, (String, ProcessResult)>> =
-            FuturesUnordered::new();
-        let mut posts_iter = filtered_posts.into_iter();
 
-        while tasks.len() < max_concurrent {
-            let Some(post) = posts_iter.next() else {
-                break;
-            };
+        for post in filtered_posts {
             last_id = Some(post.id.clone());
-            let rate_limiter = Arc::clone(&self.rate_limiter);
-            let taxonomy = Arc::clone(&taxonomy);
-            tasks.push(Box::pin(async move {
-                rate_limiter.acquire().await;
-                let result = self.process_post(&post, taxonomy.as_ref()).await;
-                (post.id, result)
-            }));
+            self.rate_limiter.acquire().await;
+            let post_id = post.id.clone();
+            let result = self.process_post(&post).await;
+            results.push((post_id, result));
         }
 
-        while let Some(result) = tasks.next().await {
-            results.push(result);
-            while tasks.len() < max_concurrent {
-                let Some(post) = posts_iter.next() else {
-                    break;
-                };
-                last_id = Some(post.id.clone());
-                let rate_limiter = Arc::clone(&self.rate_limiter);
-                let taxonomy = Arc::clone(&taxonomy);
-                tasks.push(Box::pin(async move {
-                    rate_limiter.acquire().await;
-                    let result = self.process_post(&post, taxonomy.as_ref()).await;
-                    (post.id, result)
-                }));
-            }
-        }
-
-        // Update since_id
         if let Some(last_id) = last_id {
             let new_state = AccountState {
                 account: account.to_string(),
@@ -246,27 +187,26 @@ where
             self.state_store
                 .set_account_state(&new_state)
                 .await
-                .map_err(|e| RunLoopError::State(e.to_string()))?;
+                .map_err(|error| RunLoopError::State(error.to_string()))?;
         }
 
         Ok(results)
     }
 
-    /// Filter posts based on config
     fn filter_posts(&self, posts: Vec<SourcePost>) -> Vec<SourcePost> {
         posts
             .into_iter()
-            .filter(|p| {
-                if !self.config.include_replies && p.is_reply {
+            .filter(|post| {
+                if !self.config.include_replies && post.is_reply {
                     return false;
                 }
-                if !self.config.include_reposts && p.is_repost {
+                if !self.config.include_reposts && post.is_repost {
                     return false;
                 }
                 if self
                     .ignore_patterns
                     .iter()
-                    .any(|pattern| pattern.is_match(&p.text))
+                    .any(|pattern| pattern.is_match(&post.text))
                 {
                     return false;
                 }
@@ -275,121 +215,115 @@ where
             .collect()
     }
 
-    /// Process a single post
-    async fn process_post(&self, post: &SourcePost, taxonomy: &Taxonomy) -> ProcessResult {
-        // Check idempotency
+    async fn process_post(&self, post: &SourcePost) -> ProcessResult {
         match self
             .state_store
-            .is_processed(&post.id, &taxonomy.hash)
+            .is_processed(&post.id, &self.config.lens.id)
             .await
         {
             Ok(true) => {
                 return ProcessResult::Skipped {
-                    reason: "Already processed with this taxonomy".to_string(),
+                    reason: "Already processed for this lens".to_string(),
                 };
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to check processed state, continuing");
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to check processed state, continuing");
             }
             Ok(false) => {}
         }
 
-        // Classify
-        let classify_usecase = ClassifyUseCase::new(
-            self.classifier.as_ref(),
-            self.config.classify_config.clone(),
-        );
+        let ctx = PostContext {
+            post: post.clone(),
+            wiki_path: self.config.wiki_path.clone(),
+            lens: self.config.lens.clone(),
+            candidate_slug: candidate_slug(post),
+        };
 
-        let classification = match classify_usecase.classify(post, &taxonomy.definitions).await {
-            Ok(c) => c,
-            Err(e) => {
-                return ProcessResult::Failed {
-                    error: format!("Classification failed: {}", e),
-                };
+        let agent_return = match self.harness.process_post(ctx).await {
+            Ok(agent_return) => agent_return,
+            Err(error) => {
+                let message = format!("Harness failed: {}", error);
+                if let Err(state_error) = self.record_failed(post).await {
+                    tracing::error!(error = %state_error, "Failed to record harness failure");
+                }
+                return ProcessResult::Failed { error: message };
             }
         };
 
-        tracing::info!(
-            post_id = %post.id,
-            tags = ?classification.tags.iter().map(|t| &t.id).collect::<Vec<_>>(),
-            "Classified post"
-        );
-
-        if self.config.dry_run {
-            let renderer = Renderer::new(self.config.render_config.clone());
-            let rendered = renderer.render_for_x(post, &classification);
-            tracing::info!(
-                post_id = %post.id,
-                rendered_text = %rendered.text,
-                "[DRY RUN] Would publish"
-            );
-            return ProcessResult::Published {
-                source_post: Box::new(post.clone()),
-                classification,
-                x_post_id: None,
-                nostr_event_id: None,
-            };
-        }
-
-        // Publish
-        let renderer = Renderer::new(self.config.render_config.clone());
         let mut x_post_id = None;
         let mut nostr_event_id = None;
 
-        // Publish to X
-        if self.x_publisher.is_enabled() {
-            let rendered = renderer.render_for_x(post, &classification);
-            match self.x_publisher.publish(&rendered).await {
-                Ok(result) => {
-                    x_post_id = Some(result.id);
+        if agent_return.stance != Stance::Decline && agent_return.stance != Stance::Failed {
+            if self.config.dry_run {
+                tracing::info!(
+                    post_id = %post.id,
+                    one_liner = ?agent_return.one_liner,
+                    "[DRY RUN] Would publish commentary"
+                );
+            } else {
+                let rendered = render_reply(post, &agent_return);
+
+                if self.x_publisher.is_enabled() {
+                    match self.x_publisher.publish(&rendered).await {
+                        Ok(result) => x_post_id = Some(result.id),
+                        Err(error) => {
+                            tracing::error!(error = %error, "Failed to publish to X");
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to publish to X");
+
+                if self.nostr_publisher.is_enabled() {
+                    match self.nostr_publisher.publish(&rendered).await {
+                        Ok(result) => nostr_event_id = Some(result.id),
+                        Err(error) => {
+                            tracing::error!(error = %error, "Failed to publish to Nostr");
+                        }
+                    }
                 }
             }
         }
 
-        // Publish to Nostr
-        if self.nostr_publisher.is_enabled() {
-            let rendered = renderer.render_for_nostr(post, &classification);
-            match self.nostr_publisher.publish(&rendered).await {
-                Ok(result) => {
-                    nostr_event_id = Some(result.id);
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to publish to Nostr");
-                }
-            }
-        }
-
-        // Record published state
-        let record = PublishedRecord {
-            id: Uuid::new_v4(),
-            source_post_id: post.id.clone(),
-            taxonomy_hash: taxonomy.hash.clone(),
+        let record = ProcessedPostRecord {
+            post_id: post.id.clone(),
+            lens_id: self.config.lens.id.clone(),
+            processed_at: self.clock.now(),
+            stance: agent_return.stance,
+            raw_path: Some(agent_return.raw_path.clone()),
+            thesis_slug: agent_return.thesis_slug.clone(),
             x_post_id: x_post_id.clone(),
             nostr_event_id: nostr_event_id.clone(),
-            published_at: self.clock.now(),
         };
 
-        if let Err(e) = self.state_store.record_published(&record).await {
-            tracing::error!(error = %e, "Failed to record published state");
+        if let Err(error) = self.state_store.record_processed(&record).await {
+            tracing::error!(error = %error, "Failed to record processed state");
         }
 
-        ProcessResult::Published {
+        ProcessResult::Processed {
             source_post: Box::new(post.clone()),
-            classification,
+            agent_return,
             x_post_id,
             nostr_event_id,
         }
     }
+
+    async fn record_failed(&self, post: &SourcePost) -> Result<(), StateError> {
+        let record = ProcessedPostRecord {
+            post_id: post.id.clone(),
+            lens_id: self.config.lens.id.clone(),
+            processed_at: self.clock.now(),
+            stance: Stance::Failed,
+            raw_path: None,
+            thesis_slug: None,
+            x_post_id: None,
+            nostr_event_id: None,
+        };
+        self.state_store.record_processed(&record).await
+    }
 }
 
-/// Errors from the run loop
+/// Errors from the run loop.
 #[derive(Debug, thiserror::Error)]
 pub enum RunLoopError {
-    #[error("Definitions error: {0}")]
-    Definitions(String),
     #[error("Post source error: {0}")]
     PostSource(String),
     #[error("State error: {0}")]
@@ -489,31 +423,57 @@ fn compile_ignore_patterns(patterns: &[String]) -> Vec<Regex> {
         .collect()
 }
 
-// Implement Classifier for Arc<C> where C: Classifier
-use async_trait::async_trait;
+fn render_reply(post: &SourcePost, agent_return: &AgentReturn) -> RenderedPost {
+    RenderedPost {
+        text: agent_return.one_liner.clone().unwrap_or_default(),
+        source_post_id: post.id.clone(),
+        source_post_url: post.url.clone(),
+    }
+}
+
+pub fn candidate_slug(post: &SourcePost) -> String {
+    let date = post
+        .created_at
+        .date()
+        .to_string()
+        .replace('[', "")
+        .replace(']', "");
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+
+    for ch in post.text.chars().flat_map(char::to_lowercase).take(120) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        format!("{}-{}", date, post.id)
+    } else {
+        format!("{}-{}", date, slug)
+    }
+}
 
 #[async_trait]
-impl<C: Classifier + ?Sized> Classifier for &C {
-    async fn classify(
-        &self,
-        input: crate::model::ClassifyInput,
-    ) -> Result<crate::model::ClassifyOutput, ClassifyError> {
-        (*self).classify(input).await
+impl<H: Harness + ?Sized> Harness for &H {
+    async fn process_post(&self, ctx: PostContext) -> Result<AgentReturn, HarnessError> {
+        (*self).process_post(ctx).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClassifyInput, ClassifyOutput, RenderedPost, TagDefinition, TagMatch};
-    use crate::ports::{
-        DefinitionsError, PostSourceError, PublishError, PublishResult, StateError,
-    };
+    use crate::ports::{PostSourceError, PublishError, PublishResult};
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::Mutex as StdMutex;
     use time::OffsetDateTime;
 
-    // Fake implementations for testing
     struct FakePostSource {
         posts: Vec<SourcePost>,
     }
@@ -529,48 +489,28 @@ mod tests {
         }
     }
 
-    struct FakeDefinitionsRepo {
-        definitions: Vec<TagDefinition>,
+    struct FakeHarness {
+        result: AgentReturn,
     }
 
     #[async_trait]
-    impl DefinitionsRepo for FakeDefinitionsRepo {
-        async fn load(&self) -> Result<Vec<TagDefinition>, DefinitionsError> {
-            Ok(self.definitions.clone())
-        }
-
-        async fn validate(&self) -> Result<(), DefinitionsError> {
-            Ok(())
-        }
-    }
-
-    struct FakeClassifier;
-
-    #[async_trait]
-    impl Classifier for FakeClassifier {
-        async fn classify(&self, _input: ClassifyInput) -> Result<ClassifyOutput, ClassifyError> {
-            Ok(ClassifyOutput::new(
-                "Test summary".to_string(),
-                vec![TagMatch {
-                    id: "test_tag".to_string(),
-                    confidence: 0.9,
-                    rationale: "Test rationale".to_string(),
-                    evidence: vec!["evidence".to_string()],
-                }],
-            ))
+    impl Harness for FakeHarness {
+        async fn process_post(&self, _ctx: PostContext) -> Result<AgentReturn, HarnessError> {
+            Ok(self.result.clone())
         }
     }
 
     struct FakePublisher {
         enabled: bool,
-        platform: &'static str,
+        published: StdMutex<Vec<RenderedPost>>,
     }
 
     #[async_trait]
     impl Publisher for FakePublisher {
-        async fn publish(&self, _post: &RenderedPost) -> Result<PublishResult, PublishError> {
+        async fn publish(&self, post: &RenderedPost) -> Result<PublishResult, PublishError> {
+            self.published.lock().unwrap().push(post.clone());
             Ok(PublishResult {
-                id: "fake_id".to_string(),
+                id: "published-id".to_string(),
                 url: None,
             })
         }
@@ -580,22 +520,13 @@ mod tests {
         }
 
         fn platform(&self) -> &'static str {
-            self.platform
+            "fake"
         }
     }
 
     struct FakeStateStore {
-        accounts: Mutex<HashMap<String, AccountState>>,
-        processed: Mutex<HashMap<String, bool>>,
-    }
-
-    impl FakeStateStore {
-        fn new() -> Self {
-            Self {
-                accounts: Mutex::new(HashMap::new()),
-                processed: Mutex::new(HashMap::new()),
-            }
-        }
+        accounts: StdMutex<HashMap<String, AccountState>>,
+        processed: StdMutex<HashMap<String, ProcessedPostRecord>>,
     }
 
     #[async_trait]
@@ -615,212 +546,119 @@ mod tests {
             Ok(())
         }
 
-        async fn is_processed(
-            &self,
-            source_post_id: &str,
-            taxonomy_hash: &str,
-        ) -> Result<bool, StateError> {
-            let key = format!("{}:{}", source_post_id, taxonomy_hash);
-            Ok(*self.processed.lock().unwrap().get(&key).unwrap_or(&false))
+        async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
+            Ok(self
+                .processed
+                .lock()
+                .unwrap()
+                .get(post_id)
+                .map(|record| record.lens_id == lens_id)
+                .unwrap_or(false))
         }
 
-        async fn record_published(&self, record: &PublishedRecord) -> Result<(), StateError> {
-            let key = format!("{}:{}", record.source_post_id, record.taxonomy_hash);
-            self.processed.lock().unwrap().insert(key, true);
+        async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
+            self.processed
+                .lock()
+                .unwrap()
+                .insert(record.post_id.clone(), record.clone());
             Ok(())
         }
 
-        async fn get_published(
+        async fn get_processed(
             &self,
-            _source_post_id: &str,
-            _taxonomy_hash: &str,
-        ) -> Result<Option<PublishedRecord>, StateError> {
-            Ok(None)
+            post_id: &str,
+        ) -> Result<Option<ProcessedPostRecord>, StateError> {
+            Ok(self.processed.lock().unwrap().get(post_id).cloned())
         }
     }
 
-    struct FakeClock {
-        time: OffsetDateTime,
+    #[derive(Default)]
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> OffsetDateTime {
+            OffsetDateTime::UNIX_EPOCH
+        }
     }
 
-    impl Clock for FakeClock {
-        fn now(&self) -> OffsetDateTime {
-            self.time
+    fn sample_post(id: &str) -> SourcePost {
+        SourcePost {
+            id: id.to_string(),
+            text: "Test news item".to_string(),
+            author: "tester".to_string(),
+            url: "https://example.com/post".to_string(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            is_repost: false,
+            is_reply: false,
+            reply_to_id: None,
+        }
+    }
+
+    fn sample_lens() -> Lens {
+        Lens {
+            id: "test-lens".to_string(),
+            voice: None,
+            register: None,
+            path: "lens.md".into(),
+            content: "Lens body".to_string(),
+        }
+    }
+
+    fn sample_agent_return() -> AgentReturn {
+        AgentReturn {
+            stance: Stance::Critique,
+            raw_path: "raw/news/item.md".to_string(),
+            raw_slug: Some("item".to_string()),
+            thesis_path: Some("theses/item.md".to_string()),
+            thesis_slug: Some("item".to_string()),
+            one_liner: Some("One line.".to_string()),
         }
     }
 
     #[tokio::test]
-    async fn test_poll_once_processes_posts() {
-        let post_source = Arc::new(FakePostSource {
-            posts: vec![SourcePost {
-                id: "post1".to_string(),
-                text: "Test post".to_string(),
-                author: "testuser".to_string(),
-                url: "https://x.com/testuser/status/post1".to_string(),
-                created_at: OffsetDateTime::now_utc(),
-                is_repost: false,
-                is_reply: false,
-                reply_to_id: None,
-            }],
+    async fn poll_once_processes_posts_serially_and_records_state() {
+        let state = Arc::new(FakeStateStore {
+            accounts: StdMutex::new(HashMap::new()),
+            processed: StdMutex::new(HashMap::new()),
         });
-
-        let definitions_repo = Arc::new(FakeDefinitionsRepo {
-            definitions: vec![TagDefinition {
-                id: "test_tag".to_string(),
-                title: "Test Tag".to_string(),
-                aliases: vec![],
-                short: None,
-                content: "Test definition".to_string(),
-                file_path: "test_tag.md".to_string(),
-            }],
-        });
-
-        let classifier = Arc::new(FakeClassifier);
-        let x_publisher = Arc::new(FakePublisher {
+        let x = Arc::new(FakePublisher {
             enabled: false,
-            platform: "x",
+            published: StdMutex::new(vec![]),
         });
-        let nostr_publisher = Arc::new(FakePublisher {
+        let nostr = Arc::new(FakePublisher {
             enabled: false,
-            platform: "nostr",
+            published: StdMutex::new(vec![]),
         });
-        let state_store = Arc::new(FakeStateStore::new());
-        let clock = Arc::new(FakeClock {
-            time: OffsetDateTime::now_utc(),
-        });
-
-        let config = RunLoopConfig {
-            accounts: vec!["testuser".to_string()],
-            dry_run: true,
-            ..Default::default()
-        };
-
         let run_loop = RunLoop::new(
-            post_source,
-            definitions_repo,
-            classifier,
-            x_publisher,
-            nostr_publisher,
-            state_store,
-            clock,
-            config,
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["tester".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
         );
 
-        let results = run_loop.poll_once().await.unwrap();
+        let results = run_loop.poll_once().await.expect("poll");
 
         assert_eq!(results.len(), 1);
-        assert!(matches!(results[0].1, ProcessResult::Published { .. }));
+        assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
+        assert!(state.get_processed("1").await.unwrap().is_some());
     }
 
-    #[tokio::test]
-    async fn test_poll_once_filters_replies() {
-        let post_source = Arc::new(FakePostSource {
-            posts: vec![SourcePost {
-                id: "reply1".to_string(),
-                text: "This is a reply".to_string(),
-                author: "testuser".to_string(),
-                url: "https://x.com/testuser/status/reply1".to_string(),
-                created_at: OffsetDateTime::now_utc(),
-                is_repost: false,
-                is_reply: true,
-                reply_to_id: Some("original".to_string()),
-            }],
-        });
-
-        let definitions_repo = Arc::new(FakeDefinitionsRepo {
-            definitions: vec![],
-        });
-        let classifier = Arc::new(FakeClassifier);
-        let x_publisher = Arc::new(FakePublisher {
-            enabled: false,
-            platform: "x",
-        });
-        let nostr_publisher = Arc::new(FakePublisher {
-            enabled: false,
-            platform: "nostr",
-        });
-        let state_store = Arc::new(FakeStateStore::new());
-        let clock = Arc::new(FakeClock {
-            time: OffsetDateTime::now_utc(),
-        });
-
-        let config = RunLoopConfig {
-            accounts: vec!["testuser".to_string()],
-            include_replies: false, // Filter out replies
-            dry_run: true,
-            ..Default::default()
-        };
-
-        let run_loop = RunLoop::new(
-            post_source,
-            definitions_repo,
-            classifier,
-            x_publisher,
-            nostr_publisher,
-            state_store,
-            clock,
-            config,
+    #[test]
+    fn candidate_slug_uses_date_and_text() {
+        assert_eq!(
+            candidate_slug(&sample_post("1")),
+            "1970-01-01-test-news-item"
         );
-
-        let results = run_loop.poll_once().await.unwrap();
-
-        // Reply should be filtered out
-        assert_eq!(results.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_poll_once_filters_ignore_patterns() {
-        let post_source = Arc::new(FakePostSource {
-            posts: vec![SourcePost {
-                id: "ad1".to_string(),
-                text: "AD: Buy now".to_string(),
-                author: "testuser".to_string(),
-                url: "https://x.com/testuser/status/ad1".to_string(),
-                created_at: OffsetDateTime::now_utc(),
-                is_repost: false,
-                is_reply: false,
-                reply_to_id: None,
-            }],
-        });
-
-        let definitions_repo = Arc::new(FakeDefinitionsRepo {
-            definitions: vec![],
-        });
-        let classifier = Arc::new(FakeClassifier);
-        let x_publisher = Arc::new(FakePublisher {
-            enabled: false,
-            platform: "x",
-        });
-        let nostr_publisher = Arc::new(FakePublisher {
-            enabled: false,
-            platform: "nostr",
-        });
-        let state_store = Arc::new(FakeStateStore::new());
-        let clock = Arc::new(FakeClock {
-            time: OffsetDateTime::now_utc(),
-        });
-
-        let config = RunLoopConfig {
-            accounts: vec!["testuser".to_string()],
-            ignore_patterns: vec!["^AD:".to_string()],
-            dry_run: true,
-            ..Default::default()
-        };
-
-        let run_loop = RunLoop::new(
-            post_source,
-            definitions_repo,
-            classifier,
-            x_publisher,
-            nostr_publisher,
-            state_store,
-            clock,
-            config,
-        );
-
-        let results = run_loop.poll_once().await.unwrap();
-
-        // Post should be filtered out by ignore pattern
-        assert_eq!(results.len(), 0);
     }
 }

@@ -36,10 +36,9 @@ async fn init_config(path: std::path::PathBuf, force: bool) -> Result<()> {
     println!("Created config file: {}", path.display());
     println!();
     println!("Next steps:");
-    println!("  1. Edit the config file to set your accounts and API keys");
-    println!("  2. Create a definitions directory with your tag definitions");
-    println!("  3. Run 'news-tagger doctor' to validate your setup");
-    println!("  4. Run 'news-tagger run --dry-run --once' to test");
+    println!("  1. Edit the wiki, lens, harness, and account settings");
+    println!("  2. Run 'news-lens doctor' to validate your setup");
+    println!("  3. Run 'news-lens process --post --text \"Test news item\" --dry-run' to test");
 
     Ok(())
 }

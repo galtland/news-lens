@@ -7,7 +7,7 @@ pub use read::XPostSource;
 pub use write::XPublisher;
 
 use async_trait::async_trait;
-use news_tagger_domain::{
+use news_lens_domain::{
     PostSource, PostSourceError, PublishError, PublishResult, Publisher, RenderedPost, SourcePost,
 };
 

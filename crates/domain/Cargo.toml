@@ -1,5 +1,5 @@
 [package]
-name = "news-tagger-domain"
+name = "news-lens-domain"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,13 +7,12 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 time = { workspace = true }
-sha2 = { workspace = true }
-uuid = { workspace = true }
 tracing = { workspace = true }
 regex = "1"
 tokio = { workspace = true }
-futures = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }

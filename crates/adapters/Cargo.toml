@@ -1,12 +1,12 @@
 [package]
-name = "news-tagger-adapters"
+name = "news-lens-adapters"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-news-tagger-domain = { workspace = true }
+news-lens-domain = { workspace = true }
 
 # Async
 tokio = { workspace = true }
@@ -18,7 +18,6 @@ reqwest = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
@@ -43,9 +42,6 @@ secrecy = { workspace = true }
 
 # UUID
 uuid = { workspace = true }
-
-# Regex for frontmatter parsing
-regex = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

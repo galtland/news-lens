@@ -1,203 +1,375 @@
-//! Domain models and value objects
+//! Domain models and value objects.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
-/// A source post from a watched platform (e.g., X/Twitter)
+/// A source post from a watched platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourcePost {
-    /// Platform-specific post ID
+    /// Platform-specific post ID.
     pub id: String,
-    /// Post text content
+    /// Post text content.
     pub text: String,
-    /// Author username/handle
+    /// Author username/handle.
     pub author: String,
-    /// URL to the original post
+    /// URL to the original post.
     pub url: String,
-    /// When the post was created
+    /// When the post was created.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
-    /// Whether this is a repost/retweet
+    /// Whether this is a repost/retweet.
     pub is_repost: bool,
-    /// Whether this is a reply
+    /// Whether this is a reply.
     pub is_reply: bool,
-    /// ID of post being replied to, if any
+    /// ID of post being replied to, if any.
     pub reply_to_id: Option<String>,
 }
 
-/// A user-defined narrative tag definition loaded from markdown
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TagDefinition {
-    /// Unique identifier (from filename or frontmatter)
+/// Active editorial lens loaded from markdown.
+#[derive(Debug, Clone)]
+pub struct Lens {
     pub id: String,
-    /// Human-readable title
-    pub title: String,
-    /// Optional aliases for the tag
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    /// Short description (from frontmatter)
-    pub short: Option<String>,
-    /// Full markdown content
+    pub voice: Option<String>,
+    pub register: Option<String>,
+    pub path: PathBuf,
     pub content: String,
-    /// Source file path
-    pub file_path: String,
 }
 
-/// A collection of tag definitions with computed hash
+/// Context passed to the subprocess harness for one post.
 #[derive(Debug, Clone)]
-pub struct Taxonomy {
-    /// All loaded tag definitions
-    pub definitions: Vec<TagDefinition>,
-    /// SHA-256 hash of all definitions (for idempotency)
-    pub hash: String,
-}
-
-impl Taxonomy {
-    /// Create a new taxonomy from definitions, computing the hash
-    pub fn new(mut definitions: Vec<TagDefinition>) -> Self {
-        // Sort by ID for deterministic hashing
-        definitions.sort_by(|a, b| a.id.cmp(&b.id));
-
-        let mut hasher = Sha256::new();
-        for def in &definitions {
-            hasher.update(def.id.as_bytes());
-            hasher.update(def.content.as_bytes());
-            hasher.update(def.file_path.as_bytes());
-        }
-        let hash = format!("{:x}", hasher.finalize());
-
-        Self { definitions, hash }
-    }
-
-    /// Get a definition by ID
-    pub fn get(&self, id: &str) -> Option<&TagDefinition> {
-        self.definitions.iter().find(|d| d.id == id)
-    }
-
-    /// Get all definition IDs
-    pub fn ids(&self) -> Vec<&str> {
-        self.definitions.iter().map(|d| d.id.as_str()).collect()
-    }
-}
-
-/// Input for the classification use case
-#[derive(Debug, Clone)]
-pub struct ClassifyInput {
-    /// The post to classify
+pub struct PostContext {
     pub post: SourcePost,
-    /// Tag definitions to consider
-    pub definitions: Vec<TagDefinition>,
-    /// Maximum output characters (for platform constraints)
-    pub max_output_chars: Option<usize>,
-    /// Optional policy/guardrails text
-    pub policy_text: Option<String>,
+    pub wiki_path: PathBuf,
+    pub lens: Lens,
+    pub candidate_slug: String,
 }
 
-/// A single tag match in classification output
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TagMatch {
-    /// Tag ID that matched
-    pub id: String,
-    /// Confidence score 0.0-1.0
-    pub confidence: f64,
-    /// Rationale for the match
-    pub rationale: String,
-    /// Evidence excerpts from the post
-    pub evidence: Vec<String>,
+/// Agent stance vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stance {
+    Endorse,
+    Critique,
+    Contextualize,
+    Decline,
+    Failed,
 }
 
-/// Output from the classification use case
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClassifyOutput {
-    /// Schema version
-    pub version: String,
-    /// Neutral summary of the post
-    pub summary: String,
-    /// Matched tags with confidences
-    pub tags: Vec<TagMatch>,
-}
-
-impl ClassifyOutput {
-    pub const SCHEMA_VERSION: &'static str = "1";
-
-    /// Create a new classification output
-    pub fn new(summary: String, tags: Vec<TagMatch>) -> Self {
-        Self {
-            version: Self::SCHEMA_VERSION.to_string(),
-            summary,
-            tags,
+impl Stance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Endorse => "endorse",
+            Self::Critique => "critique",
+            Self::Contextualize => "contextualize",
+            Self::Decline => "decline",
+            Self::Failed => "failed",
         }
     }
 }
 
-/// Publishing mode for X posts
+impl std::fmt::Display for Stance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Stance {
+    type Err = AgentValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "endorse" => Ok(Self::Endorse),
+            "critique" => Ok(Self::Critique),
+            "contextualize" => Ok(Self::Contextualize),
+            "decline" => Ok(Self::Decline),
+            "failed" => Ok(Self::Failed),
+            other => Err(AgentValidationError::InvalidStance(other.to_string())),
+        }
+    }
+}
+
+/// Raw JSON shape printed by the agent before contract validation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawAgentReturn {
+    pub stance: Option<String>,
+    pub raw_path: Option<String>,
+    pub raw_slug: Option<String>,
+    pub thesis_path: Option<String>,
+    pub thesis_slug: Option<String>,
+    pub one_liner: Option<String>,
+}
+
+/// Validated JSON return from the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReturn {
+    pub stance: Stance,
+    pub raw_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thesis_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thesis_slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_liner: Option<String>,
+}
+
+impl RawAgentReturn {
+    /// Validate the agent contract from spec section 9.
+    pub fn validate(self, wiki_root: &Path) -> Result<AgentReturn, AgentValidationError> {
+        let stance: Stance = self
+            .stance
+            .ok_or(AgentValidationError::MissingField("stance"))?
+            .parse()?;
+
+        let raw_path = self
+            .raw_path
+            .ok_or(AgentValidationError::MissingField("raw_path"))?;
+        if resolve_existing_wiki_path(wiki_root, &raw_path).is_none() {
+            return Err(AgentValidationError::MissingPath {
+                field: "raw_path",
+                path: raw_path,
+            });
+        }
+
+        let mut one_liner = self.one_liner.map(|value| truncate_one_liner(&value, 240));
+
+        if stance != Stance::Decline {
+            let thesis_path = self
+                .thesis_path
+                .ok_or(AgentValidationError::MissingField("thesis_path"))?;
+            if resolve_existing_wiki_path(wiki_root, &thesis_path).is_none() {
+                return Err(AgentValidationError::MissingPath {
+                    field: "thesis_path",
+                    path: thesis_path,
+                });
+            }
+
+            let thesis_slug = self
+                .thesis_slug
+                .ok_or(AgentValidationError::MissingField("thesis_slug"))?;
+            let required_one_liner = one_liner
+                .take()
+                .ok_or(AgentValidationError::MissingField("one_liner"))?;
+
+            return Ok(AgentReturn {
+                stance,
+                raw_path,
+                raw_slug: self.raw_slug,
+                thesis_path: Some(thesis_path),
+                thesis_slug: Some(thesis_slug),
+                one_liner: Some(required_one_liner),
+            });
+        }
+
+        Ok(AgentReturn {
+            stance,
+            raw_path,
+            raw_slug: self.raw_slug,
+            thesis_path: self.thesis_path,
+            thesis_slug: self.thesis_slug,
+            one_liner,
+        })
+    }
+}
+
+/// Validation errors for the agent return contract.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AgentValidationError {
+    #[error("missing field: {0}")]
+    MissingField(&'static str),
+    #[error("invalid stance: {0}")]
+    InvalidStance(String),
+    #[error("{field} does not exist: {path}")]
+    MissingPath { field: &'static str, path: String },
+}
+
+/// Publishing mode for X posts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum XPublishMode {
-    /// Reply to the original post
+    /// Reply to the original post.
     #[default]
     Reply,
-    /// Quote the original post
+    /// Quote the original post.
     Quote,
-    /// Create a standalone post with link
+    /// Create a standalone post with link.
     NewPost,
 }
 
-/// Rendered content ready for publishing
+/// Rendered content ready for publishing.
 #[derive(Debug, Clone)]
 pub struct RenderedPost {
-    /// The text content
     pub text: String,
-    /// Reference to the original post
     pub source_post_id: String,
-    /// Source post URL
     pub source_post_url: String,
 }
 
-/// Record of a published post (for idempotency)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishedRecord {
-    /// Unique record ID
-    pub id: Uuid,
-    /// Source post ID
-    pub source_post_id: String,
-    /// Taxonomy hash at time of publishing
-    pub taxonomy_hash: String,
-    /// X post ID if published to X
-    pub x_post_id: Option<String>,
-    /// Nostr event ID if published to Nostr
-    pub nostr_event_id: Option<String>,
-    /// When published
-    #[serde(with = "time::serde::rfc3339")]
-    pub published_at: OffsetDateTime,
-}
-
-/// Account watch state
+/// Account watch state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountState {
-    /// Account username
     pub account: String,
-    /// Last seen post ID
     pub since_id: Option<String>,
-    /// When last updated
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
-/// Processing result for a single post
+/// Record of what happened to one source post.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessedPostRecord {
+    pub post_id: String,
+    pub lens_id: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub processed_at: OffsetDateTime,
+    pub stance: Stance,
+    pub raw_path: Option<String>,
+    pub thesis_slug: Option<String>,
+    pub x_post_id: Option<String>,
+    pub nostr_event_id: Option<String>,
+}
+
+/// Processing result for a single post.
 #[derive(Debug)]
 pub enum ProcessResult {
-    /// Post was classified and published
-    Published {
+    /// Post was processed by the harness and recorded.
+    Processed {
         source_post: Box<SourcePost>,
-        classification: ClassifyOutput,
+        agent_return: AgentReturn,
         x_post_id: Option<String>,
         nostr_event_id: Option<String>,
     },
-    /// Post was skipped (already processed, filtered, etc.)
+    /// Post was skipped (already processed, filtered, etc.).
     Skipped { reason: String },
-    /// Classification or publishing failed
+    /// Harness, validation, publishing, or recording failed.
     Failed { error: String },
+}
+
+fn resolve_existing_wiki_path(wiki_root: &Path, value: &str) -> Option<PathBuf> {
+    let path = Path::new(value);
+    if path.is_absolute() && path.exists() {
+        return Some(path.to_path_buf());
+    }
+
+    let joined = wiki_root.join(path);
+    if joined.exists() {
+        return Some(joined);
+    }
+
+    if let Ok(stripped) = path.strip_prefix("wiki") {
+        let joined = wiki_root.join(stripped);
+        if joined.exists() {
+            return Some(joined);
+        }
+    }
+
+    None
+}
+
+fn truncate_one_liner(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+
+    let reserve = 3;
+    let limit = max_len.saturating_sub(reserve);
+    let mut cut = 0;
+    for (idx, _) in value.char_indices() {
+        if idx <= limit {
+            cut = idx;
+        } else {
+            break;
+        }
+    }
+
+    let candidate = value[..cut]
+        .rfind(char::is_whitespace)
+        .filter(|idx| *idx > 0)
+        .unwrap_or(cut);
+    format!("{}...", value[..candidate].trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wiki_with_files() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("raw/news")).expect("raw dir");
+        std::fs::create_dir_all(dir.path().join("theses")).expect("theses dir");
+        std::fs::write(dir.path().join("raw/news/item.md"), "# News").expect("raw file");
+        std::fs::write(dir.path().join("theses/item.md"), "# Thesis").expect("thesis file");
+        dir
+    }
+
+    fn valid_raw() -> RawAgentReturn {
+        RawAgentReturn {
+            stance: Some("critique".to_string()),
+            raw_path: Some("raw/news/item.md".to_string()),
+            raw_slug: Some("item".to_string()),
+            thesis_path: Some("theses/item.md".to_string()),
+            thesis_slug: Some("item".to_string()),
+            one_liner: Some("A concise line.".to_string()),
+        }
+    }
+
+    #[test]
+    fn validation_rejects_missing_field() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.raw_path = None;
+
+        let error = raw.validate(wiki.path()).expect_err("missing raw_path");
+        assert_eq!(error, AgentValidationError::MissingField("raw_path"));
+    }
+
+    #[test]
+    fn validation_rejects_bad_stance_enum() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("maybe".to_string());
+
+        let error = raw.validate(wiki.path()).expect_err("bad stance");
+        assert_eq!(
+            error,
+            AgentValidationError::InvalidStance("maybe".to_string())
+        );
+    }
+
+    #[test]
+    fn validation_rejects_missing_thesis_path_on_non_decline_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.thesis_path = None;
+
+        let error = raw.validate(wiki.path()).expect_err("missing thesis path");
+        assert_eq!(error, AgentValidationError::MissingField("thesis_path"));
+    }
+
+    #[test]
+    fn validation_truncates_long_one_liner() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.one_liner = Some("word ".repeat(80));
+
+        let output = raw.validate(wiki.path()).expect("valid with truncation");
+        assert!(output.one_liner.expect("one_liner").len() <= 240);
+    }
+
+    #[test]
+    fn validation_rejects_missing_raw_path_file() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.raw_path = Some("raw/news/missing.md".to_string());
+
+        let error = raw.validate(wiki.path()).expect_err("missing raw file");
+        assert_eq!(
+            error,
+            AgentValidationError::MissingPath {
+                field: "raw_path",
+                path: "raw/news/missing.md".to_string()
+            }
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! JSONL file-based post source adapter
 
 use async_trait::async_trait;
-use news_tagger_domain::{PostSource, PostSourceError, SourcePost, compare_post_ids};
+use news_lens_domain::{PostSource, PostSourceError, SourcePost, compare_post_ids};
 use std::path::PathBuf;
 
 /// Post source that reads SourcePost entries from a JSONL file

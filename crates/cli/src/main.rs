@@ -1,4 +1,4 @@
-//! news-tagger CLI entry point
+//! news-lens CLI entry point
 
 use anyhow::Result;
 use clap::Parser;
@@ -21,12 +21,11 @@ async fn main() -> Result<()> {
     // Execute command
     match cli.command {
         Commands::Run(args) => commands::run::execute(args, cli.config).await,
-        Commands::Fetch(args) => commands::fetch::execute(args, cli.config).await,
-        Commands::Classify(args) => commands::classify::execute(args, cli.config).await,
-        Commands::Definitions(args) => commands::definitions::execute(args, cli.config).await,
+        Commands::Process(args) => commands::process::execute(args, cli.config).await,
+        Commands::Wiki(args) => commands::wiki::execute(args, cli.config).await,
+        Commands::Lens(args) => commands::lens::execute(args, cli.config).await,
         Commands::Config(args) => commands::config::execute(args).await,
         Commands::Doctor(args) => commands::doctor::execute(args, cli.config).await,
-        Commands::Curate(args) => commands::curate::execute(args, cli.config).await,
     }
 }
 

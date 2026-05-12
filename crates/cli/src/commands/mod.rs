@@ -1,9 +1,9 @@
 //! CLI command implementations
 
-pub mod classify;
+pub mod common;
 pub mod config;
-pub mod curate;
-pub mod definitions;
 pub mod doctor;
-pub mod fetch;
+pub mod lens;
+pub mod process;
 pub mod run;
+pub mod wiki;

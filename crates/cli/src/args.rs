@@ -1,18 +1,18 @@
-//! CLI argument definitions
+//! CLI argument definitions.
 
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
-/// news-tagger: CLI tool for classifying posts using LLM-powered narrative tagging
+/// news-lens: wiki-grounded news commentary.
 #[derive(Parser, Debug)]
-#[command(name = "news-tagger")]
+#[command(name = "news-lens")]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Path to configuration file
+    /// Path to configuration file.
     #[arg(short, long, global = true)]
     pub config: Option<PathBuf>,
 
-    /// Log level (trace, debug, info, warn, error)
+    /// Log level (trace, debug, info, warn, error).
     #[arg(long, global = true)]
     pub log_level: Option<String>,
 
@@ -22,110 +22,92 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Watch accounts, classify posts, and publish results
+    /// Fetch new posts, process them with the harness, and optionally publish.
     Run(RunArgs),
 
-    /// Fetch posts from accounts and save as JSONL (no classification)
-    Fetch(FetchArgs),
+    /// Process one synthetic post or a JSONL fixture.
+    Process(ProcessArgs),
 
-    /// One-shot classification of text
-    Classify(ClassifyArgs),
+    /// Inspect the configured wiki.
+    Wiki(WikiArgs),
 
-    /// Manage tag definitions
-    Definitions(DefinitionsArgs),
+    /// Inspect configured lens files.
+    Lens(LensArgs),
 
-    /// Configuration management
+    /// Configuration management.
     Config(ConfigArgs),
 
-    /// Validate configuration and show status
+    /// Validate configuration and show status.
     Doctor(DoctorArgs),
-
-    /// Interactive TUI for curating post classifications
-    Curate(CurateArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    /// Run in dry-run mode (no actual publishing)
+    /// Run in dry-run mode (no publishing).
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Process one poll cycle and exit
+    /// Process one poll cycle and exit.
     #[arg(long)]
     pub once: bool,
 
-    /// Write rendered posts to outbox file for review instead of publishing
+    /// Write rendered posts to outbox for review instead of publishing.
     #[arg(long)]
     pub require_approval: bool,
 
-    /// Path to outbox file (used with --require-approval)
+    /// Path to outbox file (used with --require-approval).
     #[arg(long)]
     pub outbox: Option<PathBuf>,
-
-    /// Output full classification results as JSON (use with --once)
-    #[arg(long)]
-    pub json: bool,
-
-    /// Use a JSONL file as post source instead of X API
-    #[arg(long)]
-    pub source: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
-pub struct FetchArgs {
-    /// Output JSONL file path
-    #[arg(long, default_value = "./collected.jsonl")]
-    pub output: PathBuf,
+pub struct ProcessArgs {
+    /// Process one ad-hoc post. The optional value is used as text unless --text is set.
+    #[arg(long, num_args = 0..=1, conflicts_with = "jsonl")]
+    pub post: Option<Option<String>>,
 
-    /// Override accounts to fetch (comma-separated)
-    #[arg(long, value_delimiter = ',')]
-    pub accounts: Option<Vec<String>>,
-}
-
-#[derive(Args, Debug)]
-pub struct ClassifyArgs {
-    /// Text to classify
-    #[arg(long, conflicts_with = "file")]
+    /// Text for --post.
+    #[arg(long, requires = "post")]
     pub text: Option<String>,
 
-    /// File containing text to classify (use - for stdin)
-    #[arg(long, conflicts_with = "text")]
-    pub file: Option<PathBuf>,
+    /// Process posts from a SourcePost JSONL fixture.
+    #[arg(long, conflicts_with = "post")]
+    pub jsonl: Option<PathBuf>,
 
-    /// Output as JSON
+    /// No publishing. Single-post processing never writes state; JSONL processing still records state.
     #[arg(long)]
-    pub json: bool,
+    pub dry_run: bool,
 
-    /// Override definitions directory
+    /// Accepted for flag consistency; process does not publish in phases 1-2.
     #[arg(long)]
-    pub definitions_dir: Option<PathBuf>,
+    pub require_approval: bool,
 }
 
 #[derive(Args, Debug)]
-pub struct DefinitionsArgs {
+pub struct WikiArgs {
     #[command(subcommand)]
-    pub command: DefinitionsCommands,
+    pub command: WikiCommands,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum DefinitionsCommands {
-    /// List all loaded definitions
-    List {
-        /// Override definitions directory
-        #[arg(long)]
-        definitions_dir: Option<PathBuf>,
+pub enum WikiCommands {
+    /// Show wiki path and simple content counts.
+    Status,
+}
 
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
+#[derive(Args, Debug)]
+pub struct LensArgs {
+    #[command(subcommand)]
+    pub command: LensCommands,
+}
 
-    /// Validate definitions
-    Validate {
-        /// Override definitions directory
-        #[arg(long)]
-        definitions_dir: Option<PathBuf>,
-    },
+#[derive(Subcommand, Debug)]
+pub enum LensCommands {
+    /// List lens markdown files near the configured lens.
+    List,
+
+    /// Show one lens by id.
+    Show { id: String },
 }
 
 #[derive(Args, Debug)]
@@ -136,13 +118,13 @@ pub struct ConfigArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommands {
-    /// Generate example configuration file
+    /// Generate example configuration file.
     Init {
-        /// Path to write config file
+        /// Path to write config file.
         #[arg(long, default_value = "./config.toml")]
         path: PathBuf,
 
-        /// Overwrite existing file
+        /// Overwrite existing file.
         #[arg(long)]
         force: bool,
     },
@@ -150,26 +132,7 @@ pub enum ConfigCommands {
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
-    /// Check specific component (config, definitions, llm, x, nostr)
-    #[arg(long)]
-    pub check: Option<String>,
-
-    /// Output as JSON
+    /// Output as JSON.
     #[arg(long)]
     pub json: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct CurateArgs {
-    /// Input JSONL file with collected posts
-    #[arg(long, default_value = "./collected.jsonl")]
-    pub input: PathBuf,
-
-    /// Output JSONL file for curated classifications
-    #[arg(long, default_value = "./curated.jsonl")]
-    pub output: PathBuf,
-
-    /// Override definitions directory
-    #[arg(long)]
-    pub definitions_dir: Option<PathBuf>,
 }

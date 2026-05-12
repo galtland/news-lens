@@ -1,7 +1,7 @@
 //! X API read adapter for fetching posts
 
 use async_trait::async_trait;
-use news_tagger_domain::{PostSource, PostSourceError, SourcePost, compare_post_ids};
+use news_lens_domain::{PostSource, PostSourceError, SourcePost, compare_post_ids};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;

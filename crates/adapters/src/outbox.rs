@@ -1,8 +1,8 @@
 //! Outbox publisher for require-approval mode.
 
 use async_trait::async_trait;
-use news_tagger_domain::model::RenderedPost;
-use news_tagger_domain::ports::{PublishError, PublishResult, Publisher};
+use news_lens_domain::model::RenderedPost;
+use news_lens_domain::ports::{PublishError, PublishResult, Publisher};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
