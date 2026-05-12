@@ -65,10 +65,16 @@ fn process_post_with_stub_harness_outputs_valid_json() {
 #[test]
 fn doctor_accepts_stub_fixture() {
     let mut cmd = cargo_bin_cmd!("news-lens");
-    cmd.current_dir(workspace_root())
+    let output = cmd
+        .current_dir(workspace_root())
         .args(["--config", "fixtures/config/stub-harness.toml", "doctor"])
-        .assert()
-        .success();
+        .output()
+        .expect("run doctor");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("Config [OK]:"));
+    assert!(stdout.contains("X Read [WARN]:"));
 }
 
 #[test]

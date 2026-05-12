@@ -11,7 +11,7 @@ use crate::{
     compare_post_ids,
     model::{
         AccountState, AgentReturn, Lens, PostContext, ProcessResult, ProcessedPostRecord,
-        RenderedPost, SourcePost, Stance,
+        RawAgentReturn, RenderedPost, SourcePost, Stance,
     },
     ports::{
         Clock, Harness, HarnessError, PostSource, Publisher, StateError, StateStore, SystemClock,
@@ -244,8 +244,12 @@ where
         let agent_return = match self.harness.process_post(ctx).await {
             Ok(agent_return) => agent_return,
             Err(error) => {
+                let raw = match &error {
+                    HarnessError::Validation { raw, .. } => Some(raw.as_ref()),
+                    _ => None,
+                };
                 let message = format!("Harness failed: {}", error);
-                self.record_failed(post).await.map_err(state_error)?;
+                self.record_failed(post, raw).await.map_err(state_error)?;
                 return Ok(ProcessResult::Failed { error: message });
             }
         };
@@ -335,14 +339,18 @@ where
         })
     }
 
-    async fn record_failed(&self, post: &SourcePost) -> Result<(), StateError> {
+    async fn record_failed(
+        &self,
+        post: &SourcePost,
+        raw: Option<&RawAgentReturn>,
+    ) -> Result<(), StateError> {
         let record = ProcessedPostRecord {
             post_id: post.id.clone(),
             lens_id: self.config.lens.id.clone(),
             processed_at: self.clock.now(),
             stance: Stance::Failed,
-            raw_path: None,
-            thesis_slug: None,
+            raw_path: raw.and_then(|raw| raw.raw_path.clone()),
+            thesis_slug: raw.and_then(|raw| raw.thesis_slug.clone()),
             x_post_id: None,
             nostr_event_id: None,
         };
@@ -562,6 +570,25 @@ mod tests {
     impl Harness for FakeHarness {
         async fn process_post(&self, _ctx: PostContext) -> Result<AgentReturn, HarnessError> {
             Ok(self.result.clone())
+        }
+    }
+
+    struct ValidationFailingHarness;
+
+    #[async_trait]
+    impl Harness for ValidationFailingHarness {
+        async fn process_post(&self, _ctx: PostContext) -> Result<AgentReturn, HarnessError> {
+            Err(HarnessError::Validation {
+                message: "missing field: thesis_path".to_string(),
+                raw: Box::new(RawAgentReturn {
+                    stance: Some("critique".to_string()),
+                    raw_path: Some("raw/news/partial.md".to_string()),
+                    raw_slug: Some("partial".to_string()),
+                    thesis_path: None,
+                    thesis_slug: Some("partial-thesis".to_string()),
+                    one_liner: Some("Partial line".to_string()),
+                }),
+            })
         }
     }
 
@@ -897,6 +924,50 @@ mod tests {
         assert_eq!(record.stance, Stance::Critique);
         assert_eq!(record.raw_path.as_deref(), Some("raw/news/item.md"));
         assert_eq!(record.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[tokio::test]
+    async fn harness_validation_failure_records_partial_agent_fields() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(ValidationFailingHarness),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect("process");
+
+        assert!(matches!(results[0].1, ProcessResult::Failed { .. }));
+        let record = state
+            .get_processed("1")
+            .await
+            .expect("state")
+            .expect("recorded failure");
+        assert_eq!(record.stance, Stance::Failed);
+        assert_eq!(record.raw_path.as_deref(), Some("raw/news/partial.md"));
+        assert_eq!(record.thesis_slug.as_deref(), Some("partial-thesis"));
     }
 
     #[tokio::test]

@@ -62,11 +62,11 @@ pub struct RunArgs {
 
 #[derive(Args, Debug)]
 pub struct ProcessArgs {
-    /// Process one ad-hoc post. The optional value is used as text unless --text is set.
+    /// Process one source post ID, or one ad-hoc post when --text is supplied.
     #[arg(long, num_args = 0..=1, conflicts_with = "jsonl")]
     pub post: Option<Option<String>>,
 
-    /// Text for --post.
+    /// Text for an ad-hoc --post. If --post has a value, that value is used as the post ID.
     #[arg(long, requires = "post")]
     pub text: Option<String>,
 

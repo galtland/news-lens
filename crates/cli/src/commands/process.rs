@@ -15,7 +15,9 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 use crate::args::ProcessArgs;
-use crate::commands::common::{build_harness, build_publishers, load_configured_lens};
+use crate::commands::common::{
+    build_harness, build_publishers, build_x_post_source, load_configured_lens,
+};
 use crate::config::AppConfig;
 
 pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -29,7 +31,7 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
                 "--dry-run is implicit for process --post; no state or publishing occurs"
             );
         }
-        let post = synthetic_post(post_arg, args.text)?;
+        let post = resolve_single_post(post_arg, args.text, &config).await?;
         let candidate_slug = candidate_slug(&post);
         let ctx = news_lens_domain::PostContext {
             post,
@@ -102,11 +104,64 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
     bail!("Expected --post or --jsonl")
 }
 
-fn synthetic_post(post_arg: Option<String>, text_arg: Option<String>) -> Result<SourcePost> {
-    let text = match (post_arg, text_arg) {
-        (_, Some(text)) => text,
-        (Some(value), None) => value,
-        (None, None) => bail!("--post requires a value or --text"),
+async fn resolve_single_post(
+    post_arg: Option<String>,
+    text_arg: Option<String>,
+    config: &AppConfig,
+) -> Result<SourcePost> {
+    match text_arg {
+        Some(text) => synthetic_post(post_arg, text),
+        None => {
+            let Some(value) = post_arg else {
+                bail!("--post requires a value or --text")
+            };
+
+            if should_lookup_source_id(&value, config) {
+                match fetch_source_post_by_id(&value, config).await {
+                    Ok(Some(post)) => return Ok(post),
+                    Ok(None) if looks_like_x_post_id(&value) => {
+                        bail!(
+                            "No configured source post found with id {}; use --text to process this value literally",
+                            value
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) if looks_like_x_post_id(&value) => return Err(error),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            post_arg = %value,
+                            "Source post lookup failed; treating --post value as ad-hoc text"
+                        );
+                    }
+                }
+            }
+
+            synthetic_post(None, value)
+        }
+    }
+}
+
+async fn fetch_source_post_by_id(post_id: &str, config: &AppConfig) -> Result<Option<SourcePost>> {
+    let source = build_x_post_source(config).context("Failed to initialize X post lookup")?;
+    source
+        .fetch_post_by_id(post_id)
+        .await
+        .with_context(|| format!("Failed to fetch source post id {}", post_id))
+}
+
+fn should_lookup_source_id(value: &str, config: &AppConfig) -> bool {
+    !config.watch.accounts.is_empty() || looks_like_x_post_id(value)
+}
+
+fn looks_like_x_post_id(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn synthetic_post(post_id: Option<String>, text: String) -> Result<SourcePost> {
+    let id = match post_id {
+        Some(value) if !value.trim().is_empty() => value,
+        Some(_) | None => "cli-input".to_string(),
     };
 
     if text.trim().is_empty() {
@@ -114,7 +169,7 @@ fn synthetic_post(post_arg: Option<String>, text_arg: Option<String>) -> Result<
     }
 
     Ok(SourcePost {
-        id: "cli-input".to_string(),
+        id,
         text,
         author: "cli".to_string(),
         url: String::new(),
@@ -123,6 +178,35 @@ fn synthetic_post(post_arg: Option<String>, text_arg: Option<String>) -> Result<
         is_reply: false,
         reply_to_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_post_uses_explicit_id_when_text_is_provided() {
+        let post = synthetic_post(Some("source-123".to_string()), "body".to_string())
+            .expect("synthetic post");
+
+        assert_eq!(post.id, "source-123");
+        assert_eq!(post.text, "body");
+    }
+
+    #[test]
+    fn synthetic_post_defaults_id_when_only_text_is_provided() {
+        let post = synthetic_post(None, "body".to_string()).expect("synthetic post");
+
+        assert_eq!(post.id, "cli-input");
+        assert_eq!(post.text, "body");
+    }
+
+    #[test]
+    fn x_post_id_heuristic_requires_digits_only() {
+        assert!(looks_like_x_post_id("1234567890"));
+        assert!(!looks_like_x_post_id("fixture-1"));
+        assert!(!looks_like_x_post_id("short headline"));
+    }
 }
 
 #[derive(Serialize)]

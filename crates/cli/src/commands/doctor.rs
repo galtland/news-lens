@@ -217,5 +217,10 @@ fn print_report(report: &DoctorReport) {
 }
 
 fn print_check(name: &str, result: &CheckResult) {
-    println!("{}: {}", name, result.message);
+    println!(
+        "{} [{}]: {}",
+        name,
+        result.status.to_uppercase(),
+        result.message
+    );
 }

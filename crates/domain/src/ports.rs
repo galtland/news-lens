@@ -5,7 +5,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::model::{
-    AccountState, AgentReturn, PostContext, ProcessedPostRecord, RenderedPost, SourcePost,
+    AccountState, AgentReturn, PostContext, ProcessedPostRecord, RawAgentReturn, RenderedPost,
+    SourcePost,
 };
 
 /// Error type for post source operations.
@@ -30,6 +31,15 @@ pub trait PostSource: Send + Sync {
         account: &str,
         since_id: Option<&str>,
     ) -> Result<Vec<SourcePost>, PostSourceError>;
+
+    /// Fetch a specific source post by platform ID when the adapter supports it.
+    async fn fetch_post_by_id(&self, post_id: &str) -> Result<Option<SourcePost>, PostSourceError> {
+        Ok(self
+            .fetch_posts("*", None)
+            .await?
+            .into_iter()
+            .find(|post| post.id == post_id))
+    }
 }
 
 /// Error type for harness operations.
@@ -43,8 +53,11 @@ pub enum HarnessError {
     Timeout { timeout_secs: u64 },
     #[error("invalid response: {0}")]
     InvalidResponse(String),
-    #[error("validation error: {0}")]
-    Validation(String),
+    #[error("validation error: {message}")]
+    Validation {
+        message: String,
+        raw: Box<RawAgentReturn>,
+    },
 }
 
 /// Port for the subprocess harness.

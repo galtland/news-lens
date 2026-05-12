@@ -142,48 +142,78 @@ impl XPostSource {
             .data
             .unwrap_or_default()
             .into_iter()
-            .map(|tweet| {
-                let is_repost = tweet
-                    .referenced_tweets
-                    .as_ref()
-                    .map(|refs| refs.iter().any(|r| r.r#type == "retweeted"))
-                    .unwrap_or(false);
-
-                let is_reply = tweet
-                    .referenced_tweets
-                    .as_ref()
-                    .map(|refs| refs.iter().any(|r| r.r#type == "replied_to"))
-                    .unwrap_or(false);
-
-                let reply_to_id = tweet.referenced_tweets.as_ref().and_then(|refs| {
-                    refs.iter()
-                        .find(|r| r.r#type == "replied_to")
-                        .map(|r| r.id.clone())
-                });
-
-                let created_at = tweet
-                    .created_at
-                    .as_ref()
-                    .and_then(|s| {
-                        OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-                            .ok()
-                    })
-                    .unwrap_or_else(OffsetDateTime::now_utc);
-
-                SourcePost {
-                    id: tweet.id.clone(),
-                    text: tweet.text,
-                    author: username.to_string(),
-                    url: format!("https://x.com/{}/status/{}", username, tweet.id),
-                    created_at,
-                    is_repost,
-                    is_reply,
-                    reply_to_id,
-                }
-            })
+            .map(|tweet| source_post_from_tweet(tweet, Some(username)))
             .collect();
 
         Ok(posts)
+    }
+
+    /// Fetch a tweet directly by ID.
+    async fn fetch_tweet_by_id(
+        &self,
+        post_id: &str,
+    ) -> Result<Option<SourcePost>, PostSourceError> {
+        let url = format!(
+            "{}/2/tweets/{}?tweet.fields=created_at,referenced_tweets,author_id&expansions=author_id&user.fields=username",
+            self.base_url, post_id
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.bearer_token.expose_secret()),
+            )
+            .send()
+            .await
+            .map_err(|e| PostSourceError::Network(e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(PostSourceError::Auth("Invalid bearer token".to_string()));
+        }
+
+        if response.status() == 404 {
+            return Ok(None);
+        }
+
+        if response.status() == 429 {
+            let retry_after = response
+                .headers()
+                .get("x-rate-limit-reset")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ts| {
+                    let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
+                    Duration::from_secs(ts.saturating_sub(now))
+                });
+            return Err(PostSourceError::RateLimited(retry_after));
+        }
+
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(PostSourceError::Api(format!(
+                "Failed to get tweet: {}",
+                body
+            )));
+        }
+
+        let tweet_response: TweetResponse = response
+            .json()
+            .await
+            .map_err(|e| PostSourceError::Api(e.to_string()))?;
+
+        let TweetResponse { data, includes } = tweet_response;
+        let Some(tweet) = data else {
+            return Ok(None);
+        };
+
+        let username = tweet
+            .author_id
+            .as_ref()
+            .and_then(|author_id| username_for_author(includes.as_ref(), author_id));
+
+        Ok(Some(source_post_from_tweet(tweet, username)))
     }
 }
 
@@ -203,9 +233,27 @@ struct TweetsResponse {
 }
 
 #[derive(Deserialize)]
+struct TweetResponse {
+    data: Option<Tweet>,
+    includes: Option<TweetIncludes>,
+}
+
+#[derive(Deserialize)]
+struct TweetIncludes {
+    users: Option<Vec<IncludedUser>>,
+}
+
+#[derive(Deserialize)]
+struct IncludedUser {
+    id: String,
+    username: String,
+}
+
+#[derive(Deserialize)]
 struct Tweet {
     id: String,
     text: String,
+    author_id: Option<String>,
     created_at: Option<String>,
     referenced_tweets: Option<Vec<ReferencedTweet>>,
 }
@@ -214,6 +262,63 @@ struct Tweet {
 struct ReferencedTweet {
     r#type: String,
     id: String,
+}
+
+fn username_for_author<'a>(
+    includes: Option<&'a TweetIncludes>,
+    author_id: &str,
+) -> Option<&'a str> {
+    includes?
+        .users
+        .as_ref()?
+        .iter()
+        .find(|user| user.id == author_id)
+        .map(|user| user.username.as_str())
+}
+
+fn source_post_from_tweet(tweet: Tweet, username: Option<&str>) -> SourcePost {
+    let is_repost = tweet
+        .referenced_tweets
+        .as_ref()
+        .map(|refs| refs.iter().any(|r| r.r#type == "retweeted"))
+        .unwrap_or(false);
+
+    let is_reply = tweet
+        .referenced_tweets
+        .as_ref()
+        .map(|refs| refs.iter().any(|r| r.r#type == "replied_to"))
+        .unwrap_or(false);
+
+    let reply_to_id = tweet.referenced_tweets.as_ref().and_then(|refs| {
+        refs.iter()
+            .find(|r| r.r#type == "replied_to")
+            .map(|r| r.id.clone())
+    });
+
+    let created_at = tweet
+        .created_at
+        .as_ref()
+        .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
+        .unwrap_or_else(OffsetDateTime::now_utc);
+
+    let author = username
+        .map(str::to_string)
+        .or_else(|| tweet.author_id.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let url = username
+        .map(|username| format!("https://x.com/{}/status/{}", username, tweet.id))
+        .unwrap_or_else(|| format!("https://x.com/i/status/{}", tweet.id));
+
+    SourcePost {
+        id: tweet.id,
+        text: tweet.text,
+        author,
+        url,
+        created_at,
+        is_repost,
+        is_reply,
+        reply_to_id,
+    }
 }
 
 #[async_trait]
@@ -237,6 +342,11 @@ impl PostSource for XPostSource {
         tracing::info!(account = %account, count = posts.len(), "Fetched posts");
 
         Ok(posts)
+    }
+
+    async fn fetch_post_by_id(&self, post_id: &str) -> Result<Option<SourcePost>, PostSourceError> {
+        tracing::info!(post_id = %post_id, "Fetching post from X by ID");
+        self.fetch_tweet_by_id(post_id).await
     }
 }
 
@@ -295,6 +405,43 @@ mod tests {
         assert!(!posts[0].is_reply);
         assert_eq!(posts[1].id, "tweet2");
         assert!(posts[1].is_reply);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_post_by_id_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/tweets/tweet1"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "tweet1",
+                    "text": "Hello world",
+                    "author_id": "user1",
+                    "created_at": "2024-01-15T12:00:00Z"
+                },
+                "includes": {
+                    "users": [
+                        {"id": "user1", "username": "testuser"}
+                    ]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let source =
+            XPostSource::with_base_url(SecretString::new("test-token".into()), mock_server.uri());
+
+        let post = source
+            .fetch_post_by_id("tweet1")
+            .await
+            .expect("lookup")
+            .expect("post");
+
+        assert_eq!(post.id, "tweet1");
+        assert_eq!(post.author, "testuser");
+        assert_eq!(post.url, "https://x.com/testuser/status/tweet1");
     }
 
     #[tokio::test]

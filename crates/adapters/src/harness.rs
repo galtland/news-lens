@@ -158,8 +158,12 @@ impl Harness for SubprocessHarness {
             );
         }
 
-        raw.validate(&ctx.wiki_path)
-            .map_err(|error| HarnessError::Validation(error.to_string()))
+        raw.clone()
+            .validate(&ctx.wiki_path)
+            .map_err(|error| HarnessError::Validation {
+                message: error.to_string(),
+                raw: Box::new(raw),
+            })
     }
 }
 
@@ -177,13 +181,6 @@ fn parse_raw_agent_return(stdout: &str) -> Result<RawAgentReturn, HarnessError> 
             error, tail
         ))
     })?;
-
-    if raw.stance.is_none() {
-        return Err(HarnessError::InvalidResponse(format!(
-            "final JSON object is not the agent contract: missing field `stance`; stdout tail: {}",
-            tail
-        )));
-    }
 
     Ok(raw)
 }
@@ -393,17 +390,16 @@ diagnostic line
     }
 
     #[test]
-    fn parse_raw_agent_return_rejects_trailing_non_contract_json() {
+    fn parse_raw_agent_return_keeps_parseable_non_contract_json_for_validation() {
         let stdout = r#"
 {"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
 {"trace_id":"abc"}
 "#;
 
-        let error = parse_raw_agent_return(stdout).expect_err("not contract JSON");
+        let raw = parse_raw_agent_return(stdout).expect("raw JSON");
 
-        assert!(
-            matches!(error, HarnessError::InvalidResponse(message) if message.contains("missing field `stance`"))
-        );
+        assert!(raw.stance.is_none());
+        assert!(raw.raw_path.is_none());
     }
 
     #[test]

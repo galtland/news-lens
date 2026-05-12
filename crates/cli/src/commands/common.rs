@@ -40,8 +40,12 @@ pub fn build_post_source(config: &AppConfig) -> Result<Arc<dyn PostSource>> {
         return Ok(Arc::new(StubPostSource::empty()));
     }
 
+    Ok(Arc::new(build_x_post_source(config)?))
+}
+
+pub fn build_x_post_source(config: &AppConfig) -> Result<XPostSource> {
     let bearer_token = load_api_key(&config.x.read.bearer_token_env, "x_read")?;
-    Ok(Arc::new(XPostSource::new(bearer_token)))
+    Ok(XPostSource::new(bearer_token))
 }
 
 pub async fn build_publishers(
