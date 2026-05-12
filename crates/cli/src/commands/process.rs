@@ -1,9 +1,14 @@
 //! Process command.
 
 use anyhow::{Context, Result, bail};
-use news_lens_adapters::{jsonl::JsonlPostSource, state::SqliteStateStore, x::StubXPublisher};
+use news_lens_adapters::{
+    jsonl::JsonlPostSource,
+    nostr::NostrPublisher,
+    state::{InMemoryStateStore, SqliteStateStore},
+    x::StubXPublisher,
+};
 use news_lens_domain::{
-    Harness, PostSource, ProcessResult, SourcePost, SystemClock,
+    Harness, PostSource, ProcessResult, SourcePost, StateStore, SystemClock,
     usecases::{RunLoop, RunLoopConfig, candidate_slug},
 };
 use serde::Serialize;
@@ -52,13 +57,17 @@ pub async fn execute(args: ProcessArgs, config_path: Option<PathBuf>) -> Result<
             .fetch_posts("*", None)
             .await
             .context("Failed to load JSONL posts")?;
-        let state_store = Arc::new(
-            SqliteStateStore::new(&config.general.state_db_path)
-                .await
-                .context("Failed to initialize SQLite state store")?,
-        );
+        let state_store: Arc<dyn StateStore> = if args.dry_run {
+            Arc::new(InMemoryStateStore::new())
+        } else {
+            Arc::new(
+                SqliteStateStore::new(&config.general.state_db_path)
+                    .await
+                    .context("Failed to initialize SQLite state store")?,
+            )
+        };
         let disabled_x = Arc::new(StubXPublisher::new(false));
-        let disabled_nostr = Arc::new(StubXPublisher::new(false));
+        let disabled_nostr = Arc::new(NostrPublisher::disabled());
         let run_loop = RunLoop::new(
             Arc::new(source),
             Arc::new(harness),

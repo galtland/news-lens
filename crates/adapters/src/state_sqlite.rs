@@ -139,15 +139,13 @@ impl StateStore for SqliteStateStore {
         Ok(())
     }
 
-    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM processed_posts WHERE post_id = ? AND lens_id = ?",
-        )
-        .bind(post_id)
-        .bind(lens_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| StateError::Database(error.to_string()))?;
+    async fn is_processed(&self, post_id: &str) -> Result<bool, StateError> {
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM processed_posts WHERE post_id = ?")
+                .bind(post_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(count.0 > 0)
     }
@@ -290,8 +288,8 @@ mod tests {
 
         store.record_processed(&record).await.unwrap();
 
-        assert!(store.is_processed("post123", "lens").await.unwrap());
-        assert!(!store.is_processed("post123", "other").await.unwrap());
+        assert!(store.is_processed("post123").await.unwrap());
+        assert!(!store.is_processed("other-post").await.unwrap());
 
         let retrieved = store.get_processed("post123").await.unwrap();
         assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));

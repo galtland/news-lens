@@ -216,14 +216,10 @@ where
     }
 
     async fn process_post(&self, post: &SourcePost) -> ProcessResult {
-        match self
-            .state_store
-            .is_processed(&post.id, &self.config.lens.id)
-            .await
-        {
+        match self.state_store.is_processed(&post.id).await {
             Ok(true) => {
                 return ProcessResult::Skipped {
-                    reason: "Already processed for this lens".to_string(),
+                    reason: "Already processed".to_string(),
                 };
             }
             Err(error) => {
@@ -546,14 +542,8 @@ mod tests {
             Ok(())
         }
 
-        async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
-            Ok(self
-                .processed
-                .lock()
-                .unwrap()
-                .get(post_id)
-                .map(|record| record.lens_id == lens_id)
-                .unwrap_or(false))
+        async fn is_processed(&self, post_id: &str) -> Result<bool, StateError> {
+            Ok(self.processed.lock().unwrap().contains_key(post_id))
         }
 
         async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {

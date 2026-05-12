@@ -144,11 +144,15 @@ fn default_true() -> bool {
 }
 
 fn default_wiki_path() -> PathBuf {
-    PathBuf::from("/home/user/wiki/topics/libertarian")
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("wiki")
+        .join("topics")
+        .join("libertarian")
 }
 
 fn default_lens_path() -> PathBuf {
-    PathBuf::from("/home/user/wiki/topics/libertarian/lens-austrian-libertarian.md")
+    default_wiki_path().join("lens-austrian-libertarian.md")
 }
 
 fn default_lens_id() -> String {
@@ -193,6 +197,16 @@ fn default_x_max_chars() -> usize {
 
 fn default_nostr_secret_key_env() -> String {
     "NOSTR_NSEC".to_string()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 impl Default for GeneralConfig {
@@ -301,9 +315,21 @@ impl AppConfig {
             .context("Failed to deserialize configuration")
     }
 
+    /// Load only enough configuration to choose a logging fallback.
+    pub fn log_level_from_config(config_path: Option<&Path>) -> Option<String> {
+        Self::load(config_path)
+            .ok()
+            .map(|config| config.general.log_level)
+    }
+
     /// Generate example configuration as TOML.
     pub fn example_toml() -> String {
-        r#"# news-lens configuration
+        let wiki_path = escape_toml_string(&default_wiki_path().display().to_string());
+        let lens_path = escape_toml_string(&default_lens_path().display().to_string());
+        let prompt_template = escape_toml_string(&default_prompt_template().display().to_string());
+
+        format!(
+            r#"# news-lens configuration
 
 [general]
 state_db_path = "./state.sqlite"
@@ -311,21 +337,21 @@ log_level = "info"
 dry_run = true
 
 [wiki]
-path = "/home/user/wiki/topics/libertarian"
+path = "{wiki_path}"
 
 [lens]
-path = "/home/user/wiki/topics/libertarian/lens-austrian-libertarian.md"
+path = "{lens_path}"
 id = "austrian-libertarian"
 
 [harness]
 command = "claude"
 args = ["--print"]
-prompt_template = "./prompts/process-post.md"
+prompt_template = "{prompt_template}"
 timeout_secs = 600
 
 [watch]
 poll_interval_secs = 300
-accounts = ["example_account_1", "example_account_2"]
+accounts = []
 include_replies = false
 include_reposts = false
 ignore_patterns = []
@@ -344,6 +370,6 @@ enabled = false
 secret_key_env = "NOSTR_NSEC"
 relays = ["wss://relay.damus.io"]
 "#
-        .to_string()
+        )
     }
 }

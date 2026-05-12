@@ -68,12 +68,36 @@ impl SubprocessHarness {
             ("{{CANDIDATE_SLUG}}", ctx.candidate_slug.as_str()),
         ];
 
-        let mut rendered = template;
-        for (needle, replacement) in substitutions {
-            rendered = rendered.replace(needle, replacement);
-        }
-        Ok(rendered)
+        Ok(render_template(&template, &substitutions))
     }
+}
+
+fn render_template(template: &str, substitutions: &[(&str, &str)]) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        rendered.push_str(&rest[..start]);
+        let token_start = &rest[start..];
+        let Some(end) = token_start.find("}}") else {
+            rendered.push_str(token_start);
+            return rendered;
+        };
+
+        let token = &token_start[..end + 2];
+        if let Some((_, replacement)) = substitutions
+            .iter()
+            .find(|(placeholder, _)| *placeholder == token)
+        {
+            rendered.push_str(replacement);
+        } else {
+            rendered.push_str(token);
+        }
+        rest = &token_start[end + 2..];
+    }
+
+    rendered.push_str(rest);
+    rendered
 }
 
 #[async_trait]
@@ -214,5 +238,18 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
 
         assert_eq!(result.stance, Stance::Critique);
         assert_eq!(result.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[test]
+    fn render_template_does_not_rescan_substituted_values() {
+        let rendered = render_template(
+            "Post: {{POST_TEXT}}\nWiki: {{WIKI_PATH}}\n",
+            &[
+                ("{{POST_TEXT}}", "literal {{WIKI_PATH}}"),
+                ("{{WIKI_PATH}}", "/tmp/wiki"),
+            ],
+        );
+
+        assert_eq!(rendered, "Post: literal {{WIKI_PATH}}\nWiki: /tmp/wiki\n");
     }
 }

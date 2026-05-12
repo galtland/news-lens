@@ -25,8 +25,9 @@ Task:
 1. File the news verbatim as raw/news/YYYY-MM-DD-<slug>.md using /wiki:ingest.
    Use frontmatter: type=news, source=<url>, captured_at, author, platform.
 2. Read the lens. Decide if this post is worth commenting on per the lens
-   stances (Endorse | Critique | Contextualize | Decline). Be strict —
-   prefer Decline when the wiki has nothing substantive to add.
+   stances (Endorse | Critique | Contextualize | Decline). Return the JSON
+   stance value in lowercase: endorse, critique, contextualize, decline, or failed.
+   Be strict; prefer Decline when the wiki has nothing substantive to add.
 3. If not Decline:
    - Read 5–12 relevant articles from wiki/{concepts,topics,references}/.
      Do not read wiki/theses/ — avoid feedback loops with prior commentary.
@@ -42,5 +43,5 @@ Task:
 Constraints:
 - Never invent positions the wiki does not hold.
 - Never cite slugs that don't exist.
-- Keep one_liner ≤ 240 chars; include it as the first paragraph of the
+- Keep one_liner <= 240 chars; include it as the first paragraph of the
   thesis after the H1.

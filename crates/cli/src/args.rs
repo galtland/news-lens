@@ -74,7 +74,7 @@ pub struct ProcessArgs {
     #[arg(long, conflicts_with = "post")]
     pub jsonl: Option<PathBuf>,
 
-    /// No publishing. Single-post processing never writes state; JSONL processing still records state.
+    /// No publishing. Single-post processing never writes state; JSONL skips state DB writes.
     #[arg(long)]
     pub dry_run: bool,
 

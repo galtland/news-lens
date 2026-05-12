@@ -61,3 +61,36 @@ fn doctor_accepts_stub_fixture() {
         .assert()
         .success();
 }
+
+#[test]
+fn process_jsonl_dry_run_does_not_write_state_db() {
+    let dir = TempDir::new().expect("temp dir");
+    let config_path = dir.path().join("config.toml");
+    let state_path = dir.path().join("state.sqlite");
+    let fixture_config =
+        fs::read_to_string(workspace_root().join("fixtures/config/stub-harness.toml"))
+            .expect("fixture config");
+    fs::write(
+        &config_path,
+        fixture_config.replace(
+            r#"state_db_path = "./target/news-lens-fixture-state.sqlite""#,
+            &format!(r#"state_db_path = "{}""#, state_path.display()),
+        ),
+    )
+    .expect("write config");
+
+    let mut cmd = cargo_bin_cmd!("news-lens");
+    cmd.current_dir(workspace_root())
+        .args([
+            "process",
+            "--jsonl",
+            "fixtures/posts/source_posts.jsonl",
+            "--dry-run",
+        ])
+        .arg("--config")
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    assert!(!state_path.exists());
+}

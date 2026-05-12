@@ -15,8 +15,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
-    let log_level = cli.log_level.as_deref().unwrap_or("info");
-    init_logging(log_level)?;
+    let log_level = cli
+        .log_level
+        .clone()
+        .or_else(|| config::AppConfig::log_level_from_config(cli.config.as_deref()))
+        .unwrap_or_else(|| "info".to_string());
+    init_logging(&log_level)?;
 
     // Execute command
     match cli.command {

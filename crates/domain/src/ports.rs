@@ -108,8 +108,8 @@ pub trait StateStore: Send + Sync {
     /// Update account state.
     async fn set_account_state(&self, state: &AccountState) -> Result<(), StateError>;
 
-    /// Check if a post has already been processed for the active lens.
-    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError>;
+    /// Check if a post has already been processed.
+    async fn is_processed(&self, post_id: &str) -> Result<bool, StateError>;
 
     /// Record one processed post.
     async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError>;

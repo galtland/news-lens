@@ -45,15 +45,12 @@ impl StateStore for InMemoryStateStore {
         Ok(())
     }
 
-    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
+    async fn is_processed(&self, post_id: &str) -> Result<bool, StateError> {
         let processed = self
             .processed
             .read()
             .map_err(|error| StateError::Database(error.to_string()))?;
-        Ok(processed
-            .get(post_id)
-            .map(|record| record.lens_id == lens_id)
-            .unwrap_or(false))
+        Ok(processed.contains_key(post_id))
     }
 
     async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
@@ -116,8 +113,8 @@ mod tests {
 
         store.record_processed(&record).await.unwrap();
 
-        assert!(store.is_processed("post123", "lens").await.unwrap());
-        assert!(!store.is_processed("post123", "other").await.unwrap());
+        assert!(store.is_processed("post123").await.unwrap());
+        assert!(!store.is_processed("other-post").await.unwrap());
 
         let retrieved = store.get_processed("post123").await.unwrap();
         assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));

@@ -94,29 +94,34 @@ impl Publisher for XPublisher {
             return Err(PublishError::Api("Publisher is disabled".to_string()));
         }
 
+        let text = match self.mode {
+            XPublishMode::NewPost => text_with_source_link(post),
+            XPublishMode::Reply | XPublishMode::Quote => post.text.clone(),
+        };
+
         // Validate content length
-        if post.text.len() > self.max_chars {
+        if text.len() > self.max_chars {
             return Err(PublishError::ContentTooLong {
-                len: post.text.len(),
+                len: text.len(),
                 max: self.max_chars,
             });
         }
 
         let request = match self.mode {
             XPublishMode::Reply => CreateTweetRequest {
-                text: post.text.clone(),
+                text,
                 reply: Some(ReplySettings {
                     in_reply_to_tweet_id: post.source_post_id.clone(),
                 }),
                 quote_tweet_id: None,
             },
             XPublishMode::Quote => CreateTweetRequest {
-                text: post.text.clone(),
+                text,
                 reply: None,
                 quote_tweet_id: Some(post.source_post_id.clone()),
             },
             XPublishMode::NewPost => CreateTweetRequest {
-                text: post.text.clone(),
+                text,
                 reply: None,
                 quote_tweet_id: None,
             },
@@ -173,6 +178,17 @@ impl Publisher for XPublisher {
 
     fn platform(&self) -> &'static str {
         "x"
+    }
+}
+
+fn text_with_source_link(post: &RenderedPost) -> String {
+    let source_url = post.source_post_url.trim();
+    if source_url.is_empty() {
+        post.text.clone()
+    } else if post.text.trim().is_empty() {
+        source_url.to_string()
+    } else {
+        format!("{}\n\n{}", post.text.trim_end(), source_url)
     }
 }
 
@@ -254,6 +270,36 @@ mod tests {
         let result = publisher.publish(&sample_post()).await.unwrap();
 
         assert_eq!(result.id, "quoted_tweet_id");
+    }
+
+    #[tokio::test]
+    async fn test_publish_new_post_includes_source_link() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/2/tweets"))
+            .and(body_json(serde_json::json!({
+                "text": "Tags: test_tag (0.85)\nTest rationale\n\nhttps://x.com/user/status/original_tweet_id"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "new_post_id"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let publisher = XPublisher::with_base_url(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            XPublishMode::NewPost,
+            280,
+            true,
+        );
+
+        let result = publisher.publish(&sample_post()).await.unwrap();
+
+        assert_eq!(result.id, "new_post_id");
     }
 
     #[tokio::test]

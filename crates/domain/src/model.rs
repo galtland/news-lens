@@ -1,7 +1,7 @@
 //! Domain models and value objects.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -79,13 +79,14 @@ impl std::str::FromStr for Stance {
     type Err = AgentValidationError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim() {
+        let trimmed = value.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
             "endorse" => Ok(Self::Endorse),
             "critique" => Ok(Self::Critique),
             "contextualize" => Ok(Self::Contextualize),
             "decline" => Ok(Self::Decline),
             "failed" => Ok(Self::Failed),
-            other => Err(AgentValidationError::InvalidStance(other.to_string())),
+            _ => Err(AgentValidationError::InvalidStance(trimmed.to_string())),
         }
     }
 }
@@ -127,7 +128,7 @@ impl RawAgentReturn {
         let raw_path = self
             .raw_path
             .ok_or(AgentValidationError::MissingField("raw_path"))?;
-        if resolve_existing_wiki_path(wiki_root, &raw_path).is_none() {
+        if resolve_existing_wiki_file(wiki_root, &raw_path).is_none() {
             return Err(AgentValidationError::MissingPath {
                 field: "raw_path",
                 path: raw_path,
@@ -136,11 +137,14 @@ impl RawAgentReturn {
 
         let mut one_liner = self.one_liner.map(|value| truncate_one_liner(&value, 240));
 
-        if stance != Stance::Decline {
+        if matches!(
+            stance,
+            Stance::Endorse | Stance::Critique | Stance::Contextualize
+        ) {
             let thesis_path = self
                 .thesis_path
                 .ok_or(AgentValidationError::MissingField("thesis_path"))?;
-            if resolve_existing_wiki_path(wiki_root, &thesis_path).is_none() {
+            if resolve_existing_wiki_file(wiki_root, &thesis_path).is_none() {
                 return Err(AgentValidationError::MissingPath {
                     field: "thesis_path",
                     path: thesis_path,
@@ -246,25 +250,35 @@ pub enum ProcessResult {
     Failed { error: String },
 }
 
-fn resolve_existing_wiki_path(wiki_root: &Path, value: &str) -> Option<PathBuf> {
+fn resolve_existing_wiki_file(wiki_root: &Path, value: &str) -> Option<PathBuf> {
     let path = Path::new(value);
-    if path.is_absolute() && path.exists() {
-        return Some(path.to_path_buf());
+    if path.is_absolute()
+        || value.trim().is_empty()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
     }
 
-    let joined = wiki_root.join(path);
-    if joined.exists() {
-        return Some(joined);
-    }
+    let wiki_root = wiki_root.canonicalize().ok()?;
+    let mut candidates = vec![wiki_root.join(path)];
 
     if let Ok(stripped) = path.strip_prefix("wiki") {
-        let joined = wiki_root.join(stripped);
-        if joined.exists() {
-            return Some(joined);
-        }
+        candidates.push(wiki_root.join(stripped));
     }
 
-    None
+    candidates.into_iter().find_map(|candidate| {
+        let canonical = candidate.canonicalize().ok()?;
+        if canonical.starts_with(&wiki_root)
+            && canonical.is_file()
+            && canonical.extension().and_then(|ext| ext.to_str()) == Some("md")
+        {
+            Some(canonical)
+        } else {
+            None
+        }
+    })
 }
 
 fn truncate_one_liner(value: &str, max_len: usize) -> String {
@@ -338,6 +352,16 @@ mod tests {
     }
 
     #[test]
+    fn validation_accepts_title_case_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("Critique".to_string());
+
+        let output = raw.validate(wiki.path()).expect("valid stance");
+        assert_eq!(output.stance, Stance::Critique);
+    }
+
+    #[test]
     fn validation_rejects_missing_thesis_path_on_non_decline_stance() {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
@@ -345,6 +369,22 @@ mod tests {
 
         let error = raw.validate(wiki.path()).expect_err("missing thesis path");
         assert_eq!(error, AgentValidationError::MissingField("thesis_path"));
+    }
+
+    #[test]
+    fn validation_accepts_failed_without_thesis_fields() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("failed".to_string());
+        raw.thesis_path = None;
+        raw.thesis_slug = None;
+        raw.one_liner = None;
+
+        let output = raw.validate(wiki.path()).expect("failed stance");
+        assert_eq!(output.stance, Stance::Failed);
+        assert!(output.thesis_path.is_none());
+        assert!(output.thesis_slug.is_none());
+        assert!(output.one_liner.is_none());
     }
 
     #[test]
@@ -371,5 +411,43 @@ mod tests {
                 path: "raw/news/missing.md".to_string()
             }
         );
+    }
+
+    #[test]
+    fn validation_rejects_paths_outside_the_wiki() {
+        let wiki = wiki_with_files();
+        let outside_dir = tempfile::TempDir::new().expect("outside temp dir");
+        let outside = outside_dir.path().join("outside.md");
+        std::fs::write(&outside, "# Outside").expect("outside file");
+
+        let mut absolute = valid_raw();
+        absolute.raw_path = Some(outside.display().to_string());
+        assert!(matches!(
+            absolute.validate(wiki.path()),
+            Err(AgentValidationError::MissingPath {
+                field: "raw_path",
+                ..
+            })
+        ));
+
+        let mut parent = valid_raw();
+        parent.raw_path = Some("../outside.md".to_string());
+        assert!(matches!(
+            parent.validate(wiki.path()),
+            Err(AgentValidationError::MissingPath {
+                field: "raw_path",
+                ..
+            })
+        ));
+
+        let mut empty = valid_raw();
+        empty.raw_path = Some(String::new());
+        assert!(matches!(
+            empty.validate(wiki.path()),
+            Err(AgentValidationError::MissingPath {
+                field: "raw_path",
+                ..
+            })
+        ));
     }
 }
