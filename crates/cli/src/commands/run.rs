@@ -69,26 +69,13 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     if args.once {
         let report = run_loop.poll_once_report().await?;
         log_results(&report.results);
-        if let Some(exit_code) = run_once_failure_exit_code(
-            &report.results,
-            report.account_errors.len(),
-            config.watch.accounts.len(),
-        ) {
-            if report.results.is_empty() {
-                tracing::error!(
-                    accounts = report.account_errors.len(),
-                    exit_code,
-                    "all {} accounts failed before processing posts; exiting 2",
-                    report.account_errors.len()
-                );
-            } else {
-                tracing::error!(
-                    posts = report.results.len(),
-                    exit_code,
-                    "all {} posts failed; exiting 2",
-                    report.results.len()
-                );
-            }
+        if let Some(exit_code) = run_once_failure_exit_code(&report.results) {
+            tracing::error!(
+                posts = report.results.len(),
+                exit_code,
+                "all {} posts failed; exiting 2",
+                report.results.len()
+            );
             std::process::exit(exit_code);
         }
         return Ok(());
@@ -160,20 +147,13 @@ fn log_results(results: &[(String, ProcessResult)]) {
     }
 }
 
-fn run_once_failure_exit_code(
-    results: &[(String, ProcessResult)],
-    account_error_count: usize,
-    configured_account_count: usize,
-) -> Option<i32> {
+fn run_once_failure_exit_code(results: &[(String, ProcessResult)]) -> Option<i32> {
     let all_posts_failed = !results.is_empty()
         && results
             .iter()
             .all(|(_, result)| matches!(result, ProcessResult::Failed { .. }));
-    let all_accounts_failed = results.is_empty()
-        && configured_account_count > 0
-        && account_error_count == configured_account_count;
 
-    (all_posts_failed || all_accounts_failed).then_some(RUN_ONCE_ALL_FAILED_EXIT_CODE)
+    all_posts_failed.then_some(RUN_ONCE_ALL_FAILED_EXIT_CODE)
 }
 
 #[cfg(test)]
@@ -186,12 +166,7 @@ mod tests {
 
     #[test]
     fn run_once_empty_results_exit_success() {
-        assert_eq!(run_once_failure_exit_code(&[], 0, 0), None);
-    }
-
-    #[test]
-    fn run_once_empty_successful_account_results_exit_success() {
-        assert_eq!(run_once_failure_exit_code(&[], 0, 1), None);
+        assert_eq!(run_once_failure_exit_code(&[]), None);
     }
 
     #[test]
@@ -205,7 +180,7 @@ mod tests {
             }),
         ];
 
-        assert_eq!(run_once_failure_exit_code(&results, 0, 1), None);
+        assert_eq!(run_once_failure_exit_code(&results), None);
     }
 
     #[test]
@@ -220,15 +195,7 @@ mod tests {
         ];
 
         assert_eq!(
-            run_once_failure_exit_code(&results, 0, 1),
-            Some(RUN_ONCE_ALL_FAILED_EXIT_CODE)
-        );
-    }
-
-    #[test]
-    fn run_once_all_accounts_failed_results_exit_2() {
-        assert_eq!(
-            run_once_failure_exit_code(&[], 2, 2),
+            run_once_failure_exit_code(&results),
             Some(RUN_ONCE_ALL_FAILED_EXIT_CODE)
         );
     }
