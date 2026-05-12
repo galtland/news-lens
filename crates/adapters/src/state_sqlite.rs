@@ -77,21 +77,7 @@ impl SqliteStateStore {
     }
 
     async fn create_processed_posts_table(&self, table: &str) -> Result<(), StateError> {
-        let sql = format!(
-            r#"
-            CREATE TABLE IF NOT EXISTS {table} (
-                post_id        TEXT NOT NULL,
-                lens_id        TEXT NOT NULL,
-                processed_at   TEXT NOT NULL,
-                stance         TEXT NOT NULL,
-                raw_path       TEXT,
-                thesis_slug    TEXT,
-                x_post_id      TEXT,
-                nostr_event_id TEXT,
-                PRIMARY KEY (post_id, lens_id)
-            )
-            "#
-        );
+        let sql = processed_posts_table_sql(table);
         sqlx::query(&sql)
             .execute(&self.pool)
             .await
@@ -100,17 +86,33 @@ impl SqliteStateStore {
     }
 
     async fn migrate_processed_posts_primary_key(&self) -> Result<(), StateError> {
-        if self.primary_key_columns("processed_posts").await?
-            == vec!["post_id".to_string(), "lens_id".to_string()]
-        {
+        let has_lens_scoped_primary_key = self.primary_key_columns("processed_posts").await?
+            == vec!["post_id".to_string(), "lens_id".to_string()];
+        let has_old_table = self.table_exists("processed_posts_old").await?;
+
+        if has_lens_scoped_primary_key && !has_old_table {
             return Ok(());
         }
 
-        sqlx::query("ALTER TABLE processed_posts RENAME TO processed_posts_old")
-            .execute(&self.pool)
+        let mut tx = self
+            .pool
+            .begin()
             .await
             .map_err(|error| StateError::Database(error.to_string()))?;
-        self.create_processed_posts_table("processed_posts").await?;
+
+        if !has_lens_scoped_primary_key {
+            sqlx::query("ALTER TABLE processed_posts RENAME TO processed_posts_old")
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| StateError::Database(error.to_string()))?;
+
+            let sql = processed_posts_table_sql("processed_posts");
+            sqlx::query(&sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| StateError::Database(error.to_string()))?;
+        }
+
         sqlx::query(
             r#"
             INSERT OR REPLACE INTO processed_posts
@@ -119,15 +121,30 @@ impl SqliteStateStore {
             FROM processed_posts_old
             "#,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| StateError::Database(error.to_string()))?;
+
         sqlx::query("DROP TABLE processed_posts_old")
-            .execute(&self.pool)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| StateError::Database(error.to_string()))?;
+
+        tx.commit()
             .await
             .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(())
+    }
+
+    async fn table_exists(&self, table: &str) -> Result<bool, StateError> {
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
+                .bind(table)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(count.0 > 0)
     }
 
     async fn primary_key_columns(&self, table: &str) -> Result<Vec<String>, StateError> {
@@ -150,6 +167,24 @@ impl SqliteStateStore {
                 .map_err(|error| StateError::Database(error.to_string()))?;
         Ok(rows.into_iter().map(|(name,)| name).collect())
     }
+}
+
+fn processed_posts_table_sql(table: &str) -> String {
+    format!(
+        r#"
+            CREATE TABLE IF NOT EXISTS {table} (
+                post_id        TEXT NOT NULL,
+                lens_id        TEXT NOT NULL,
+                processed_at   TEXT NOT NULL,
+                stance         TEXT NOT NULL,
+                raw_path       TEXT,
+                thesis_slug    TEXT,
+                x_post_id      TEXT,
+                nostr_event_id TEXT,
+                PRIMARY KEY (post_id, lens_id)
+            )
+            "#
+    )
 }
 
 #[async_trait]
@@ -472,5 +507,55 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn migration_recovers_rows_from_leftover_old_table() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("state.sqlite");
+        let db_url = format!("sqlite:{}?mode=rwc", path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("open partial db");
+
+        sqlx::query(&processed_posts_table_sql("processed_posts"))
+            .execute(&pool)
+            .await
+            .expect("new schema");
+        sqlx::query(
+            r#"
+            CREATE TABLE processed_posts_old (
+                post_id        TEXT PRIMARY KEY,
+                lens_id        TEXT NOT NULL,
+                processed_at   TEXT NOT NULL,
+                stance         TEXT NOT NULL,
+                raw_path       TEXT,
+                thesis_slug    TEXT,
+                x_post_id      TEXT,
+                nostr_event_id TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("old leftover schema");
+        sqlx::query(
+            r#"
+            INSERT INTO processed_posts_old
+            (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id)
+            VALUES ('post123', 'lens-a', '1970-01-01T00:00:00Z', 'decline', 'raw/news/post.md', NULL, NULL, NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("old leftover row");
+        drop(pool);
+
+        let store = SqliteStateStore::new(&path).await.unwrap();
+
+        assert!(store.is_processed("post123", "lens-a").await.unwrap());
+        assert!(!store.table_exists("processed_posts_old").await.unwrap());
     }
 }

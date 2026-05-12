@@ -256,7 +256,7 @@ pub enum ProcessResult {
     Failed { error: String },
 }
 
-fn normalize_existing_wiki_file(
+pub(crate) fn normalize_existing_wiki_file(
     wiki_root: &Path,
     field: &'static str,
     value: &str,

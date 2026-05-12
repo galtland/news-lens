@@ -120,7 +120,7 @@ async fn resolve_single_post(
                 bail!("--post requires a value or --text")
             };
 
-            if should_lookup_source_id(&value, config) {
+            if should_lookup_source_id(&value) {
                 match fetch_source_post_by_id(&value, config).await {
                     Ok(Some(post)) => return Ok(post),
                     Ok(None) if looks_like_x_post_id(&value) => {
@@ -160,12 +160,12 @@ async fn fetch_source_post_by_id(post_id: &str, config: &AppConfig) -> Result<Op
         .with_context(|| format!("Failed to fetch source post id {}", post_id))
 }
 
-fn should_lookup_source_id(value: &str, config: &AppConfig) -> bool {
-    !config.watch.accounts.is_empty() || looks_like_x_post_id(value)
+fn should_lookup_source_id(value: &str) -> bool {
+    looks_like_x_post_id(value)
 }
 
 fn looks_like_x_post_id(value: &str) -> bool {
-    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+    value.len() >= 10 && value.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn synthetic_post(post_id: Option<String>, text: String) -> Result<SourcePost> {
@@ -222,8 +222,16 @@ mod tests {
     #[test]
     fn x_post_id_heuristic_requires_digits_only() {
         assert!(looks_like_x_post_id("1234567890"));
+        assert!(!looks_like_x_post_id("42"));
         assert!(!looks_like_x_post_id("fixture-1"));
         assert!(!looks_like_x_post_id("short headline"));
+    }
+
+    #[test]
+    fn source_lookup_requires_x_post_id_shape() {
+        assert!(should_lookup_source_id("1234567890"));
+        assert!(!should_lookup_source_id("fixture-1"));
+        assert!(!should_lookup_source_id("my headline"));
     }
 }
 

@@ -8,7 +8,7 @@ use crate::{
     compare_post_ids,
     model::{
         AccountState, AgentReturn, Lens, PostContext, ProcessResult, ProcessedPostRecord,
-        RawAgentReturn, RenderedPost, SourcePost, Stance,
+        RawAgentReturn, RenderedPost, SourcePost, Stance, normalize_existing_wiki_file,
     },
     ports::{
         Clock, Harness, HarnessError, PostSource, Publisher, StateError, StateStore, SystemClock,
@@ -139,9 +139,10 @@ where
         &self,
         account: &str,
     ) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
+        let account_key = cursor_account_key(&self.config.lens.id, account);
         let account_state = self
             .state_store
-            .get_account_state(account)
+            .get_account_state(&account_key)
             .await
             .map_err(|error| RunLoopError::State(error.to_string()))?;
 
@@ -173,7 +174,7 @@ where
 
         if let Some(last_id) = last_fetched_id.or_else(|| since_id.map(String::from)) {
             let new_state = AccountState {
-                account: account.to_string(),
+                account: account_key,
                 since_id: Some(last_id),
                 updated_at: self.clock.now(),
             };
@@ -345,13 +346,24 @@ where
         post: &SourcePost,
         raw: Option<&RawAgentReturn>,
     ) -> Result<(), StateError> {
+        let raw_path = raw
+            .and_then(|raw| raw.raw_path.as_deref())
+            .and_then(|path| {
+                normalize_existing_wiki_file(&self.config.wiki_path, "raw_path", path).ok()
+            });
+        let thesis_slug = raw.and_then(|raw| {
+            let path = raw.thesis_path.as_deref()?;
+            normalize_existing_wiki_file(&self.config.wiki_path, "thesis_path", path).ok()?;
+            let slug = raw.thesis_slug.as_ref()?.trim();
+            (!slug.is_empty()).then(|| slug.to_string())
+        });
         let record = ProcessedPostRecord {
             post_id: post.id.clone(),
             lens_id: self.config.lens.id.clone(),
             processed_at: self.clock.now(),
             stance: Stance::Failed,
-            raw_path: raw.and_then(|raw| raw.raw_path.clone()),
-            thesis_slug: raw.and_then(|raw| raw.thesis_slug.clone()),
+            raw_path,
+            thesis_slug,
             x_post_id: None,
             nostr_event_id: None,
         };
@@ -390,6 +402,10 @@ pub enum RunLoopError {
 
 fn state_error(error: StateError) -> RunLoopError {
     RunLoopError::State(error.to_string())
+}
+
+fn cursor_account_key(lens_id: &str, account: &str) -> String {
+    format!("lens:{}:{}:{}", lens_id.len(), lens_id, account)
 }
 
 fn compile_ignore_patterns(patterns: &[String]) -> Vec<Regex> {
@@ -490,6 +506,25 @@ mod tests {
             } else {
                 Ok(vec![sample_post("1")])
             }
+        }
+    }
+
+    struct RecordingSincePostSource {
+        seen_since_ids: StdMutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl PostSource for RecordingSincePostSource {
+        async fn fetch_posts(
+            &self,
+            _account: &str,
+            since_id: Option<&str>,
+        ) -> Result<Vec<SourcePost>, PostSourceError> {
+            self.seen_since_ids
+                .lock()
+                .unwrap()
+                .push(since_id.map(str::to_string));
+            Ok(vec![sample_post("2")])
         }
     }
 
@@ -723,6 +758,15 @@ mod tests {
         }
     }
 
+    fn wiki_with_partial_files() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("raw/news")).expect("raw dir");
+        std::fs::create_dir_all(dir.path().join("theses")).expect("theses dir");
+        std::fs::write(dir.path().join("raw/news/partial.md"), "# News").expect("raw file");
+        std::fs::write(dir.path().join("theses/partial.md"), "# Thesis").expect("thesis file");
+        dir
+    }
+
     fn sample_failed_agent_return() -> AgentReturn {
         AgentReturn {
             stance: Stance::Failed,
@@ -874,7 +918,67 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let account = state
-            .get_account_state("tester")
+            .get_account_state(&cursor_account_key("test-lens", "tester"))
+            .await
+            .expect("state")
+            .expect("account state");
+        assert_eq!(account.since_id.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn poll_once_uses_lens_scoped_cursor_state() {
+        let state = Arc::new(FakeStateStore::new());
+        state
+            .set_account_state(&AccountState {
+                account: "tester".to_string(),
+                since_id: Some("99".to_string()),
+                updated_at: OffsetDateTime::UNIX_EPOCH,
+            })
+            .await
+            .expect("bare account state");
+        state
+            .set_account_state(&AccountState {
+                account: cursor_account_key("other-lens", "tester"),
+                since_id: Some("88".to_string()),
+                updated_at: OffsetDateTime::UNIX_EPOCH,
+            })
+            .await
+            .expect("other lens account state");
+
+        let source = Arc::new(RecordingSincePostSource {
+            seen_since_ids: StdMutex::new(vec![]),
+        });
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            source.clone(),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                accounts: vec!["tester".to_string()],
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        run_loop.poll_once().await.expect("poll");
+
+        assert_eq!(source.seen_since_ids.lock().unwrap().as_slice(), &[None]);
+        let account = state
+            .get_account_state(&cursor_account_key("test-lens", "tester"))
             .await
             .expect("state")
             .expect("account state");
@@ -1063,6 +1167,7 @@ mod tests {
 
     #[tokio::test]
     async fn harness_validation_failure_records_partial_agent_fields() {
+        let wiki = wiki_with_partial_files();
         let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
             enabled: false,
@@ -1085,6 +1190,7 @@ mod tests {
             Arc::new(FixedClock),
             RunLoopConfig {
                 lens: sample_lens(),
+                wiki_path: wiki.path().to_path_buf(),
                 ..Default::default()
             },
         );
@@ -1102,11 +1208,12 @@ mod tests {
             .expect("recorded failure");
         assert_eq!(record.stance, Stance::Failed);
         assert_eq!(record.raw_path.as_deref(), Some("raw/news/partial.md"));
-        assert_eq!(record.thesis_slug.as_deref(), Some("partial-thesis"));
+        assert!(record.thesis_slug.is_none());
     }
 
     #[tokio::test]
     async fn harness_exit_failure_records_partial_agent_fields() {
+        let wiki = wiki_with_partial_files();
         let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
             enabled: false,
@@ -1129,6 +1236,7 @@ mod tests {
             Arc::new(FixedClock),
             RunLoopConfig {
                 lens: sample_lens(),
+                wiki_path: wiki.path().to_path_buf(),
                 ..Default::default()
             },
         );
@@ -1146,7 +1254,7 @@ mod tests {
             .expect("recorded failure");
         assert_eq!(record.stance, Stance::Failed);
         assert_eq!(record.raw_path.as_deref(), Some("raw/news/partial.md"));
-        assert_eq!(record.thesis_slug.as_deref(), Some("partial-thesis"));
+        assert!(record.thesis_slug.is_none());
     }
 
     #[tokio::test]

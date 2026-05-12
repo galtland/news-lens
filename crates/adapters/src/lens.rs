@@ -72,7 +72,7 @@ fn parse_frontmatter(content: &str) -> Frontmatter<'_> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
+        let value = strip_matching_quotes(value.trim());
         match key.trim() {
             "id" => parsed.id = Some(value),
             "voice" => parsed.voice = Some(value),
@@ -82,6 +82,20 @@ fn parse_frontmatter(content: &str) -> Frontmatter<'_> {
     }
 
     parsed
+}
+
+fn strip_matching_quotes(value: &str) -> &str {
+    if value.len() < 2 {
+        return value;
+    }
+
+    let mut chars = value.chars();
+    let first = chars.next();
+    let last = chars.next_back();
+    match (first, last) {
+        (Some('"'), Some('"')) | (Some('\''), Some('\'')) => chars.as_str(),
+        _ => value,
+    }
 }
 
 #[cfg(test)]
@@ -114,5 +128,13 @@ mod tests {
 
         assert_eq!(lens.id, "test");
         assert_eq!(lens.voice.as_deref(), Some("terse --- dry"));
+    }
+
+    #[test]
+    fn frontmatter_only_strips_balanced_matching_quotes() {
+        assert_eq!(strip_matching_quotes("\"terse\""), "terse");
+        assert_eq!(strip_matching_quotes("'terse'"), "terse");
+        assert_eq!(strip_matching_quotes("\"terse'"), "\"terse'");
+        assert_eq!(strip_matching_quotes("\"\"hi\"\""), "\"hi\"");
     }
 }
