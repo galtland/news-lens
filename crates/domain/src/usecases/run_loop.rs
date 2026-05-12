@@ -26,20 +26,6 @@ pub struct RunLoopConfig {
     pub lens: Lens,
 }
 
-/// Result of one poll cycle, including account-level failures that did not
-/// produce post-level results.
-#[derive(Debug, Default)]
-pub struct PollOnceReport {
-    pub results: Vec<(String, ProcessResult)>,
-    pub account_errors: Vec<PollAccountError>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PollAccountError {
-    pub account: String,
-    pub error: String,
-}
-
 impl Default for RunLoopConfig {
     fn default() -> Self {
         Self {
@@ -116,33 +102,22 @@ where
 
     /// Run a single poll cycle for all configured accounts.
     pub async fn poll_once(&self) -> Result<Vec<(String, ProcessResult)>, RunLoopError> {
-        Ok(self.poll_once_report().await?.results)
-    }
-
-    /// Run a single poll cycle and keep account-level failures for callers that
-    /// need to distinguish an idle poll from a fully failed one-shot run.
-    pub async fn poll_once_report(&self) -> Result<PollOnceReport, RunLoopError> {
-        let mut report = PollOnceReport::default();
+        let mut results = Vec::new();
 
         for account in &self.config.accounts {
             match self.poll_account(account).await {
-                Ok(account_results) => report.results.extend(account_results),
+                Ok(account_results) => results.extend(account_results),
                 Err(error) => {
-                    let error = error.to_string();
                     tracing::error!(
                         account = %account,
                         error = %error,
                         "Failed to poll account; continuing with remaining accounts"
                     );
-                    report.account_errors.push(PollAccountError {
-                        account: account.clone(),
-                        error,
-                    });
                 }
             }
         }
 
-        Ok(report)
+        Ok(results)
     }
 
     /// Process posts already supplied by a caller, used by `process --jsonl`.
@@ -554,25 +529,16 @@ mod tests {
                 .push(since_id.map(str::to_string));
             Ok(vec![sample_post("2")])
         }
-    }
-
-    struct CursorPostSource;
-
-    #[async_trait]
-    impl PostSource for CursorPostSource {
-        async fn fetch_posts(
-            &self,
-            _account: &str,
-            _since_id: Option<&str>,
-        ) -> Result<Vec<SourcePost>, PostSourceError> {
-            Ok(vec![])
-        }
 
         async fn fetch_posts_batch(
             &self,
             _account: &str,
-            _since_id: Option<&str>,
+            since_id: Option<&str>,
         ) -> Result<PostFetchBatch, PostSourceError> {
+            self.seen_since_ids
+                .lock()
+                .unwrap()
+                .push(since_id.map(str::to_string));
             Ok(PostFetchBatch {
                 posts: vec![sample_post("2")],
                 next_since_id: Some("opaque-source-cursor".to_string()),
@@ -989,45 +955,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_once_persists_source_cursor_instead_of_deriving_max_post_id() {
-        let state = Arc::new(FakeStateStore::new());
-        let x = Arc::new(FakePublisher {
-            enabled: false,
-            fail_message: None,
-            published: StdMutex::new(vec![]),
-        });
-        let nostr = Arc::new(FakePublisher {
-            enabled: false,
-            fail_message: None,
-            published: StdMutex::new(vec![]),
-        });
-        let run_loop = RunLoop::new(
-            Arc::new(CursorPostSource),
-            Arc::new(FakeHarness {
-                result: sample_agent_return(),
-            }),
-            x,
-            nostr,
-            state.clone(),
-            Arc::new(FixedClock),
-            RunLoopConfig {
-                accounts: vec!["tester".to_string()],
-                lens: sample_lens(),
-                ..Default::default()
-            },
-        );
-
-        run_loop.poll_once().await.expect("poll");
-
-        let account = state
-            .get_account_state(&cursor_account_key("test-lens", "tester"))
-            .await
-            .expect("state")
-            .expect("account state");
-        assert_eq!(account.since_id.as_deref(), Some("opaque-source-cursor"));
-    }
-
-    #[tokio::test]
     async fn poll_once_uses_lens_scoped_cursor_state() {
         let state = Arc::new(FakeStateStore::new());
         state
@@ -1084,7 +1011,7 @@ mod tests {
             .await
             .expect("state")
             .expect("account state");
-        assert_eq!(account.since_id.as_deref(), Some("2"));
+        assert_eq!(account.since_id.as_deref(), Some("opaque-source-cursor"));
     }
 
     #[tokio::test]
@@ -1127,43 +1054,6 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-    }
-
-    #[tokio::test]
-    async fn poll_once_report_retains_account_errors() {
-        let state = Arc::new(FakeStateStore::new());
-        let x = Arc::new(FakePublisher {
-            enabled: false,
-            fail_message: None,
-            published: StdMutex::new(vec![]),
-        });
-        let nostr = Arc::new(FakePublisher {
-            enabled: false,
-            fail_message: None,
-            published: StdMutex::new(vec![]),
-        });
-        let run_loop = RunLoop::new(
-            Arc::new(PerAccountPostSource),
-            Arc::new(FakeHarness {
-                result: sample_agent_return(),
-            }),
-            x,
-            nostr,
-            state,
-            Arc::new(FixedClock),
-            RunLoopConfig {
-                accounts: vec!["bad".to_string()],
-                lens: sample_lens(),
-                ..Default::default()
-            },
-        );
-
-        let report = run_loop.poll_once_report().await.expect("poll");
-
-        assert!(report.results.is_empty());
-        assert_eq!(report.account_errors.len(), 1);
-        assert_eq!(report.account_errors[0].account, "bad");
-        assert!(report.account_errors[0].error.contains("temporary failure"));
     }
 
     #[tokio::test]

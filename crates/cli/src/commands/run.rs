@@ -67,14 +67,14 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     );
 
     if args.once {
-        let report = run_loop.poll_once_report().await?;
-        log_results(&report.results);
-        if let Some(exit_code) = run_once_failure_exit_code(&report.results) {
+        let results = run_loop.poll_once().await?;
+        log_results(&results);
+        if let Some(exit_code) = run_once_failure_exit_code(&results) {
             tracing::error!(
-                posts = report.results.len(),
+                posts = results.len(),
                 exit_code,
                 "all {} posts failed; exiting 2",
-                report.results.len()
+                results.len()
             );
             std::process::exit(exit_code);
         }

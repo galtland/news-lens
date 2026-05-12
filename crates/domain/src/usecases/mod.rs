@@ -2,6 +2,4 @@
 
 pub mod run_loop;
 
-pub use run_loop::{
-    PollAccountError, PollOnceReport, RunLoop, RunLoopConfig, RunLoopError, candidate_slug,
-};
+pub use run_loop::{RunLoop, RunLoopConfig, RunLoopError, candidate_slug};
