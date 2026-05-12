@@ -210,7 +210,11 @@ where
     }
 
     async fn process_post(&self, post: &SourcePost) -> Result<ProcessResult, RunLoopError> {
-        match self.state_store.is_processed(&post.id).await {
+        match self
+            .state_store
+            .is_processed(&post.id, &self.config.lens.id)
+            .await
+        {
             Ok(true) => {
                 return Ok(ProcessResult::Skipped {
                     reason: "Already processed".to_string(),
@@ -232,6 +236,7 @@ where
             Err(error) => {
                 let raw = match &error {
                     HarnessError::Validation { raw, .. } => Some(raw.as_ref()),
+                    HarnessError::Exit { raw: Some(raw), .. } => Some(raw.as_ref()),
                     _ => None,
                 };
                 let message = format!("Harness failed: {}", error);
@@ -525,6 +530,26 @@ mod tests {
         }
     }
 
+    struct ExitFailingHarness;
+
+    #[async_trait]
+    impl Harness for ExitFailingHarness {
+        async fn process_post(&self, _ctx: PostContext) -> Result<AgentReturn, HarnessError> {
+            Err(HarnessError::Exit {
+                status: "exit status: 7".to_string(),
+                stderr: "cleanup failed".to_string(),
+                raw: Some(Box::new(RawAgentReturn {
+                    stance: Some("decline".to_string()),
+                    raw_path: Some("raw/news/partial.md".to_string()),
+                    raw_slug: Some("partial".to_string()),
+                    thesis_path: None,
+                    thesis_slug: Some("partial-thesis".to_string()),
+                    one_liner: None,
+                })),
+            })
+        }
+    }
+
     struct FakePublisher {
         enabled: bool,
         fail_message: Option<String>,
@@ -555,7 +580,7 @@ mod tests {
 
     struct FakeStateStore {
         accounts: StdMutex<HashMap<String, AccountState>>,
-        processed: StdMutex<HashMap<String, ProcessedPostRecord>>,
+        processed: StdMutex<HashMap<(String, String), ProcessedPostRecord>>,
         fail_is_processed: bool,
         record_calls: StdMutex<usize>,
         fail_record_call: Option<usize>,
@@ -613,11 +638,15 @@ mod tests {
             Ok(())
         }
 
-        async fn is_processed(&self, post_id: &str) -> Result<bool, StateError> {
+        async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
             if self.fail_is_processed {
                 return Err(StateError::Database("is_processed failed".to_string()));
             }
-            Ok(self.processed.lock().unwrap().contains_key(post_id))
+            Ok(self
+                .processed
+                .lock()
+                .unwrap()
+                .contains_key(&(post_id.to_string(), lens_id.to_string())))
         }
 
         async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
@@ -635,18 +664,24 @@ mod tests {
             }
             drop(failures);
 
-            self.processed
-                .lock()
-                .unwrap()
-                .insert(record.post_id.clone(), record.clone());
+            self.processed.lock().unwrap().insert(
+                (record.post_id.clone(), record.lens_id.clone()),
+                record.clone(),
+            );
             Ok(())
         }
 
         async fn get_processed(
             &self,
             post_id: &str,
+            lens_id: &str,
         ) -> Result<Option<ProcessedPostRecord>, StateError> {
-            Ok(self.processed.lock().unwrap().get(post_id).cloned())
+            Ok(self
+                .processed
+                .lock()
+                .unwrap()
+                .get(&(post_id.to_string(), lens_id.to_string()))
+                .cloned())
         }
     }
 
@@ -739,7 +774,72 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
-        assert!(state.get_processed("1").await.unwrap().is_some());
+        assert!(
+            state
+                .get_processed("1", "test-lens")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn processed_check_is_scoped_to_lens_id() {
+        let state = Arc::new(FakeStateStore::new());
+        state
+            .record_processed(&ProcessedPostRecord {
+                post_id: "1".to_string(),
+                lens_id: "other-lens".to_string(),
+                processed_at: OffsetDateTime::UNIX_EPOCH,
+                stance: Stance::Decline,
+                raw_path: Some("raw/news/old.md".to_string()),
+                thesis_slug: None,
+                x_post_id: None,
+                nostr_event_id: None,
+            })
+            .await
+            .expect("preload state");
+
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect("process");
+
+        assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
+        assert!(
+            state
+                .get_processed("1", "test-lens")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -819,7 +919,13 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
-        assert!(state.get_processed("1").await.unwrap().is_some());
+        assert!(
+            state
+                .get_processed("1", "test-lens")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -861,7 +967,7 @@ mod tests {
 
         assert!(matches!(results[0].1, ProcessResult::Failed { .. }));
         let record = state
-            .get_processed("1")
+            .get_processed("1", "test-lens")
             .await
             .expect("state")
             .expect("recorded failure");
@@ -909,7 +1015,7 @@ mod tests {
             matches!(&results[0].1, ProcessResult::Failed { error } if error.contains("failed stance"))
         );
         let record = state
-            .get_processed("1")
+            .get_processed("1", "test-lens")
             .await
             .expect("state")
             .expect("recorded failure");
@@ -995,7 +1101,51 @@ mod tests {
 
         assert!(matches!(results[0].1, ProcessResult::Failed { .. }));
         let record = state
-            .get_processed("1")
+            .get_processed("1", "test-lens")
+            .await
+            .expect("state")
+            .expect("recorded failure");
+        assert_eq!(record.stance, Stance::Failed);
+        assert_eq!(record.raw_path.as_deref(), Some("raw/news/partial.md"));
+        assert_eq!(record.thesis_slug.as_deref(), Some("partial-thesis"));
+    }
+
+    #[tokio::test]
+    async fn harness_exit_failure_records_partial_agent_fields() {
+        let state = Arc::new(FakeStateStore::new());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(ExitFailingHarness),
+            x,
+            nostr,
+            state.clone(),
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let results = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect("process");
+
+        assert!(matches!(results[0].1, ProcessResult::Failed { .. }));
+        let record = state
+            .get_processed("1", "test-lens")
             .await
             .expect("state")
             .expect("recorded failure");

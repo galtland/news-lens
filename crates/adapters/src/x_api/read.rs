@@ -2,9 +2,10 @@
 
 use async_trait::async_trait;
 use news_lens_domain::{PostSource, PostSourceError, SourcePost, compare_post_ids};
-use reqwest::Client;
+use reqwest::{Client, Response};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::time::Duration;
 use time::OffsetDateTime;
 
@@ -88,18 +89,60 @@ impl XPostSource {
         username: &str,
         since_id: Option<&str>,
     ) -> Result<Vec<SourcePost>, PostSourceError> {
-        let mut url = format!(
-            "{}/2/users/{}/tweets?tweet.fields=created_at,referenced_tweets&max_results=100",
-            self.base_url, user_id
-        );
+        let mut posts = Vec::new();
+        let mut pagination_token = None;
+
+        loop {
+            let tweets_response = self
+                .fetch_user_tweets_page(user_id, since_id, pagination_token.as_deref())
+                .await?;
+
+            posts.extend(
+                tweets_response
+                    .data
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|tweet| source_post_from_tweet(tweet, Some(username))),
+            );
+
+            let next_token = tweets_response
+                .meta
+                .and_then(|meta| meta.next_token)
+                .filter(|token| !token.is_empty());
+            let Some(next_token) = next_token else {
+                break;
+            };
+
+            pagination_token = Some(next_token);
+        }
+
+        Ok(posts)
+    }
+
+    async fn fetch_user_tweets_page(
+        &self,
+        user_id: &str,
+        since_id: Option<&str>,
+        pagination_token: Option<&str>,
+    ) -> Result<TweetsResponse, PostSourceError> {
+        let url = format!("{}/2/users/{}/tweets", self.base_url, user_id);
+        let mut query = vec![
+            ("tweet.fields", "created_at,referenced_tweets"),
+            ("max_results", "100"),
+        ];
 
         if let Some(since_id) = since_id {
-            url.push_str(&format!("&since_id={}", since_id));
+            query.push(("since_id", since_id));
+        }
+
+        if let Some(pagination_token) = pagination_token {
+            query.push(("pagination_token", pagination_token));
         }
 
         let response = self
             .client
             .get(&url)
+            .query(&query)
             .header(
                 "Authorization",
                 format!("Bearer {}", self.bearer_token.expose_secret()),
@@ -108,44 +151,7 @@ impl XPostSource {
             .await
             .map_err(|e| PostSourceError::Network(e.to_string()))?;
 
-        if response.status() == 401 {
-            return Err(PostSourceError::Auth("Invalid bearer token".to_string()));
-        }
-
-        if response.status() == 429 {
-            let retry_after = response
-                .headers()
-                .get("x-rate-limit-reset")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(|ts| {
-                    let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
-                    Duration::from_secs(ts.saturating_sub(now))
-                });
-            return Err(PostSourceError::RateLimited(retry_after));
-        }
-
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(PostSourceError::Api(format!(
-                "Failed to get tweets: {}",
-                body
-            )));
-        }
-
-        let tweets_response: TweetsResponse = response
-            .json()
-            .await
-            .map_err(|e| PostSourceError::Api(e.to_string()))?;
-
-        let posts = tweets_response
-            .data
-            .unwrap_or_default()
-            .into_iter()
-            .map(|tweet| source_post_from_tweet(tweet, Some(username)))
-            .collect();
-
-        Ok(posts)
+        parse_x_response(response, "tweets").await
     }
 
     /// Fetch a tweet directly by ID.
@@ -230,6 +236,12 @@ struct UserData {
 #[derive(Deserialize)]
 struct TweetsResponse {
     data: Option<Vec<Tweet>>,
+    meta: Option<TweetsMeta>,
+}
+
+#[derive(Deserialize)]
+struct TweetsMeta {
+    next_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -274,6 +286,41 @@ fn username_for_author<'a>(
         .iter()
         .find(|user| user.id == author_id)
         .map(|user| user.username.as_str())
+}
+
+async fn parse_x_response<T: DeserializeOwned>(
+    response: Response,
+    resource: &str,
+) -> Result<T, PostSourceError> {
+    if response.status() == 401 {
+        return Err(PostSourceError::Auth("Invalid bearer token".to_string()));
+    }
+
+    if response.status() == 429 {
+        let retry_after = response
+            .headers()
+            .get("x-rate-limit-reset")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|ts| {
+                let now = OffsetDateTime::now_utc().unix_timestamp() as u64;
+                Duration::from_secs(ts.saturating_sub(now))
+            });
+        return Err(PostSourceError::RateLimited(retry_after));
+    }
+
+    if !response.status().is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(PostSourceError::Api(format!(
+            "Failed to get {}: {}",
+            resource, body
+        )));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| PostSourceError::Api(e.to_string()))
 }
 
 fn source_post_from_tweet(tweet: Tweet, username: Option<&str>) -> SourcePost {
@@ -353,7 +400,9 @@ impl PostSource for XPostSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path, path_regex};
+    use wiremock::matchers::{
+        header, method, path, path_regex, query_param, query_param_is_missing,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -405,6 +454,69 @@ mod tests {
         assert!(!posts[0].is_reply);
         assert_eq!(posts[1].id, "tweet2");
         assert!(posts[1].is_reply);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_posts_follows_pagination() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/by/username/testuser"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "123456789"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param_is_missing("pagination_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "tweet1",
+                        "text": "First page",
+                        "created_at": "2024-01-15T12:00:00Z"
+                    }
+                ],
+                "meta": {
+                    "next_token": "page-2"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/2/users/123456789/tweets"))
+            .and(query_param("pagination_token", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": "tweet2",
+                        "text": "Second page",
+                        "created_at": "2024-01-15T13:00:00Z"
+                    }
+                ],
+                "meta": {}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let source =
+            XPostSource::with_base_url(SecretString::new("test-token".into()), mock_server.uri());
+
+        let posts = source.fetch_posts("testuser", None).await.unwrap();
+
+        assert_eq!(
+            posts
+                .iter()
+                .map(|post| post.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tweet1", "tweet2"]
+        );
     }
 
     #[tokio::test]

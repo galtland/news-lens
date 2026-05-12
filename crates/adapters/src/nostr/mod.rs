@@ -3,16 +3,19 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use bech32::Hrp;
+use futures_util::{SinkExt, StreamExt};
 use k256::schnorr::SigningKey;
 use news_lens_domain::{PublishError, PublishResult, Publisher, RenderedPost};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use time::OffsetDateTime;
+use tokio::time::timeout;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const NOSTR_TEXT_NOTE_KIND: u32 = 1;
 const SCHNORR_ZERO_AUX_RANDOMNESS: [u8; 32] = [0; 32];
+const RELAY_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parse a Nostr secret key from either hex or `nsec` Bech32 format.
 pub fn parse_secret_key(raw: &str) -> Result<SigningKey> {
@@ -115,7 +118,6 @@ fn decode_hex_fixed<const N: usize>(raw: &str) -> Result<[u8; N]> {
 
 /// Nostr publisher for creating notes
 pub struct NostrPublisher {
-    client: Client,
     signing_key: Option<SigningKey>,
     relays: Vec<String>,
     enabled: bool,
@@ -125,13 +127,7 @@ impl NostrPublisher {
     pub fn new(secret_key: impl AsRef<str>, relays: Vec<String>) -> Result<Self> {
         let signing_key = parse_secret_key(secret_key.as_ref())?;
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))?;
-
         Ok(Self {
-            client,
             signing_key: Some(signing_key),
             relays,
             enabled: true,
@@ -141,7 +137,6 @@ impl NostrPublisher {
     /// Create a disabled publisher (for testing/dry-run)
     pub fn disabled() -> Self {
         Self {
-            client: Client::new(),
             signing_key: None,
             relays: vec![],
             enabled: false,
@@ -190,39 +185,98 @@ impl NostrPublisher {
         Ok(hex_encode(&signing_key.verifying_key().to_bytes()))
     }
 
-    /// Publish event to a relay via HTTP (NIP-86 or relay-specific HTTP endpoint)
+    /// Publish event to a relay via NIP-01 WebSocket.
     async fn publish_to_relay(&self, relay: &str, event: &NostrEvent) -> Result<(), PublishError> {
-        // Most relays use WebSocket, but some support HTTP
-        // This is a simplified implementation
-        let url = if relay.starts_with("wss://") {
-            // Convert to HTTP endpoint if relay supports it
-            relay.replace("wss://", "https://")
-        } else if relay.starts_with("ws://") {
-            relay.replace("ws://", "http://")
-        } else {
-            relay.to_string()
-        };
-
-        let request = vec![
-            "EVENT".to_string(),
-            serde_json::to_string(event).map_err(|e| PublishError::Api(e.to_string()))?,
-        ];
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
+        let (mut socket, _) = connect_async(relay)
             .await
             .map_err(|e| PublishError::Api(format!("Failed to connect to relay: {}", e)))?;
 
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(PublishError::Api(format!("Relay rejected event: {}", body)));
-        }
+        let request = serde_json::json!(["EVENT", event]);
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .map_err(|e| PublishError::Api(format!("Failed to send event to relay: {}", e)))?;
 
-        Ok(())
+        let mut last_notice = None;
+
+        loop {
+            let message = timeout(RELAY_ACK_TIMEOUT, socket.next())
+                .await
+                .map_err(|_| PublishError::Api("Timed out waiting for relay OK".to_string()))?
+                .ok_or_else(|| {
+                    PublishError::Api(
+                        last_notice
+                            .clone()
+                            .unwrap_or_else(|| "Relay closed before OK".to_string()),
+                    )
+                })?
+                .map_err(|e| PublishError::Api(format!("Relay websocket error: {}", e)))?;
+
+            match message {
+                Message::Text(text) => {
+                    match handle_relay_text(&text, &event.id, &mut last_notice)? {
+                        RelayAck::Accepted => return Ok(()),
+                        RelayAck::Rejected(message) => {
+                            return Err(PublishError::Api(format!(
+                                "Relay rejected event: {}",
+                                message
+                            )));
+                        }
+                        RelayAck::Wait => {}
+                    }
+                }
+                Message::Ping(payload) => socket
+                    .send(Message::Pong(payload))
+                    .await
+                    .map_err(|e| PublishError::Api(format!("Failed to pong relay: {}", e)))?,
+                Message::Close(_) => {
+                    return Err(PublishError::Api(
+                        last_notice.unwrap_or_else(|| "Relay closed before OK".to_string()),
+                    ));
+                }
+                Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+            }
+        }
+    }
+}
+
+enum RelayAck {
+    Accepted,
+    Rejected(String),
+    Wait,
+}
+
+fn handle_relay_text(
+    text: &str,
+    event_id: &str,
+    last_notice: &mut Option<String>,
+) -> Result<RelayAck, PublishError> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| PublishError::Api(format!("Relay sent invalid JSON: {}", e)))?;
+    let Some(items) = value.as_array() else {
+        return Ok(RelayAck::Wait);
+    };
+
+    match items.first().and_then(|kind| kind.as_str()) {
+        Some("OK") if items.get(1).and_then(|id| id.as_str()) == Some(event_id) => {
+            if items.get(2).and_then(|accepted| accepted.as_bool()) == Some(true) {
+                Ok(RelayAck::Accepted)
+            } else {
+                let message = items
+                    .get(3)
+                    .and_then(|message| message.as_str())
+                    .unwrap_or("relay rejected event");
+                Ok(RelayAck::Rejected(message.to_string()))
+            }
+        }
+        Some("NOTICE") => {
+            *last_notice = items
+                .get(1)
+                .and_then(|message| message.as_str())
+                .map(str::to_string);
+            Ok(RelayAck::Wait)
+        }
+        _ => Ok(RelayAck::Wait),
     }
 }
 
@@ -297,8 +351,11 @@ mod tests {
     use super::*;
     use bech32::Bech32;
     use k256::schnorr::{Signature, VerifyingKey};
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message;
 
     fn sample_post() -> RenderedPost {
         RenderedPost {
@@ -319,6 +376,39 @@ mod tests {
     fn nsec_from_bytes(bytes: &[u8]) -> String {
         bech32::encode::<Bech32>(Hrp::parse("nsec").expect("valid hrp"), bytes)
             .expect("valid bech32 encoding")
+    }
+
+    async fn spawn_relay(accepted: bool) -> (String, oneshot::Receiver<Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+        let addr = listener.local_addr().expect("relay addr");
+        let (tx, rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept relay client");
+            let mut socket = accept_async(stream).await.expect("websocket handshake");
+            let message = socket
+                .next()
+                .await
+                .expect("event message")
+                .expect("valid websocket message");
+            let text = message.into_text().expect("text message");
+            let value: Value = serde_json::from_str(&text).expect("event JSON");
+            let event_id = value[1]["id"].as_str().expect("event id").to_string();
+            tx.send(value).ok();
+
+            let ack = serde_json::json!([
+                "OK",
+                event_id,
+                accepted,
+                if accepted { "" } else { "blocked" }
+            ]);
+            socket
+                .send(Message::Text(ack.to_string().into()))
+                .await
+                .expect("send ack");
+        });
+
+        (format!("ws://{}", addr), rx)
     }
 
     #[tokio::test]
@@ -342,22 +432,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": "ok"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let publisher =
-            NostrPublisher::new(sample_secret(), vec![mock_server.uri()]).expect("valid publisher");
+        let (relay, request_rx) = spawn_relay(true).await;
+        let publisher = NostrPublisher::new(sample_secret(), vec![relay]).expect("valid publisher");
 
         let result = publisher.publish(&sample_post()).await.unwrap();
 
         assert_eq!(result.id.as_deref().expect("event id").len(), 64);
+
+        let request = request_rx.await.expect("relay request");
+        assert_eq!(request[0], "EVENT");
+        assert_eq!(request[1]["id"].as_str(), result.id.as_deref());
+        assert_eq!(
+            request[1]["kind"].as_u64(),
+            Some(NOSTR_TEXT_NOTE_KIND as u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_publish_relay_rejects_event() {
+        let (relay, _request_rx) = spawn_relay(false).await;
+        let publisher = NostrPublisher::new(sample_secret(), vec![relay]).expect("valid publisher");
+
+        let error = publisher
+            .publish(&sample_post())
+            .await
+            .expect_err("relay rejection");
+
+        assert!(matches!(error, PublishError::Api(message) if message.contains("blocked")));
     }
 
     #[test]

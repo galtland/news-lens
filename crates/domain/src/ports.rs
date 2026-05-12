@@ -52,7 +52,11 @@ pub enum HarnessError {
     #[error("IO error: {0}")]
     Io(String),
     #[error("process exited with status {status}: {stderr}")]
-    Exit { status: String, stderr: String },
+    Exit {
+        status: String,
+        stderr: String,
+        raw: Option<Box<RawAgentReturn>>,
+    },
     #[error("process timed out after {timeout_secs}s")]
     Timeout { timeout_secs: u64 },
     #[error("invalid response: {0}")]
@@ -125,15 +129,18 @@ pub trait StateStore: Send + Sync {
     /// Update account state.
     async fn set_account_state(&self, state: &AccountState) -> Result<(), StateError>;
 
-    /// Check if a post has already been processed.
-    async fn is_processed(&self, post_id: &str) -> Result<bool, StateError>;
+    /// Check if a post has already been processed for the active lens.
+    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError>;
 
     /// Record one processed post.
     async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError>;
 
     /// Get the processed record for a post.
-    async fn get_processed(&self, post_id: &str)
-    -> Result<Option<ProcessedPostRecord>, StateError>;
+    async fn get_processed(
+        &self,
+        post_id: &str,
+        lens_id: &str,
+    ) -> Result<Option<ProcessedPostRecord>, StateError>;
 }
 
 /// Port for time/clock operations (enables deterministic testing).

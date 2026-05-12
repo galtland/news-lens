@@ -57,23 +57,8 @@ impl SqliteStateStore {
     }
 
     async fn run_migrations(&self) -> Result<(), StateError> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS processed_posts (
-                post_id        TEXT PRIMARY KEY,
-                lens_id        TEXT NOT NULL,
-                processed_at   TEXT NOT NULL,
-                stance         TEXT NOT NULL,
-                raw_path       TEXT,
-                thesis_slug    TEXT,
-                x_post_id      TEXT,
-                nostr_event_id TEXT
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|error| StateError::Database(error.to_string()))?;
+        self.create_processed_posts_table("processed_posts").await?;
+        self.migrate_processed_posts_primary_key().await?;
 
         sqlx::query(
             r#"
@@ -89,6 +74,70 @@ impl SqliteStateStore {
         .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(())
+    }
+
+    async fn create_processed_posts_table(&self, table: &str) -> Result<(), StateError> {
+        let sql = format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {table} (
+                post_id        TEXT NOT NULL,
+                lens_id        TEXT NOT NULL,
+                processed_at   TEXT NOT NULL,
+                stance         TEXT NOT NULL,
+                raw_path       TEXT,
+                thesis_slug    TEXT,
+                x_post_id      TEXT,
+                nostr_event_id TEXT,
+                PRIMARY KEY (post_id, lens_id)
+            )
+            "#
+        );
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn migrate_processed_posts_primary_key(&self) -> Result<(), StateError> {
+        if self.primary_key_columns("processed_posts").await?
+            == vec!["post_id".to_string(), "lens_id".to_string()]
+        {
+            return Ok(());
+        }
+
+        sqlx::query("ALTER TABLE processed_posts RENAME TO processed_posts_old")
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        self.create_processed_posts_table("processed_posts").await?;
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO processed_posts
+            (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id)
+            SELECT post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id
+            FROM processed_posts_old
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StateError::Database(error.to_string()))?;
+        sqlx::query("DROP TABLE processed_posts_old")
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StateError::Database(error.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn primary_key_columns(&self, table: &str) -> Result<Vec<String>, StateError> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk")
+                .bind(table)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 
     #[cfg(test)]
@@ -146,13 +195,15 @@ impl StateStore for SqliteStateStore {
         Ok(())
     }
 
-    async fn is_processed(&self, post_id: &str) -> Result<bool, StateError> {
-        let count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM processed_posts WHERE post_id = ?")
-                .bind(post_id)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|error| StateError::Database(error.to_string()))?;
+    async fn is_processed(&self, post_id: &str, lens_id: &str) -> Result<bool, StateError> {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM processed_posts WHERE post_id = ? AND lens_id = ?",
+        )
+        .bind(post_id)
+        .bind(lens_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| StateError::Database(error.to_string()))?;
 
         Ok(count.0 > 0)
     }
@@ -165,8 +216,7 @@ impl StateStore for SqliteStateStore {
             INSERT INTO processed_posts
             (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET
-                lens_id = excluded.lens_id,
+            ON CONFLICT(post_id, lens_id) DO UPDATE SET
                 processed_at = excluded.processed_at,
                 stance = excluded.stance,
                 raw_path = excluded.raw_path,
@@ -193,6 +243,7 @@ impl StateStore for SqliteStateStore {
     async fn get_processed(
         &self,
         post_id: &str,
+        lens_id: &str,
     ) -> Result<Option<ProcessedPostRecord>, StateError> {
         let row: Option<(
             String,
@@ -208,10 +259,11 @@ impl StateStore for SqliteStateStore {
             SELECT post_id, lens_id, processed_at, stance, raw_path, thesis_slug,
                    x_post_id, nostr_event_id
             FROM processed_posts
-            WHERE post_id = ?
+            WHERE post_id = ? AND lens_id = ?
             "#,
         )
         .bind(post_id)
+        .bind(lens_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| StateError::Database(error.to_string()))?;
@@ -295,10 +347,11 @@ mod tests {
 
         store.record_processed(&record).await.unwrap();
 
-        assert!(store.is_processed("post123").await.unwrap());
-        assert!(!store.is_processed("other-post").await.unwrap());
+        assert!(store.is_processed("post123", "lens").await.unwrap());
+        assert!(!store.is_processed("post123", "other-lens").await.unwrap());
+        assert!(!store.is_processed("other-post", "lens").await.unwrap());
 
-        let retrieved = store.get_processed("post123").await.unwrap();
+        let retrieved = store.get_processed("post123", "lens").await.unwrap();
         assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));
     }
 
@@ -339,5 +392,85 @@ mod tests {
         );
         assert!(!processed.iter().any(|column| column == "taxonomy_hash"));
         assert!(!processed.iter().any(|column| column == "cost_usd"));
+
+        let pk_columns = store.primary_key_columns("processed_posts").await.unwrap();
+        assert_eq!(pk_columns, vec!["post_id", "lens_id"]);
+    }
+
+    #[tokio::test]
+    async fn migration_updates_post_only_primary_key_to_lens_scoped_key() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("state.sqlite");
+        let db_url = format!("sqlite:{}?mode=rwc", path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .expect("open old db");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE processed_posts (
+                post_id        TEXT PRIMARY KEY,
+                lens_id        TEXT NOT NULL,
+                processed_at   TEXT NOT NULL,
+                stance         TEXT NOT NULL,
+                raw_path       TEXT,
+                thesis_slug    TEXT,
+                x_post_id      TEXT,
+                nostr_event_id TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("old schema");
+        sqlx::query(
+            r#"
+            INSERT INTO processed_posts
+            (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id)
+            VALUES ('post123', 'lens-a', '1970-01-01T00:00:00Z', 'decline', 'raw/news/post.md', NULL, NULL, NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("old row");
+        drop(pool);
+
+        let store = SqliteStateStore::new(&path).await.unwrap();
+
+        assert_eq!(
+            store.primary_key_columns("processed_posts").await.unwrap(),
+            vec!["post_id", "lens_id"]
+        );
+        assert!(store.is_processed("post123", "lens-a").await.unwrap());
+        assert!(!store.is_processed("post123", "lens-b").await.unwrap());
+
+        let record = ProcessedPostRecord {
+            post_id: "post123".to_string(),
+            lens_id: "lens-b".to_string(),
+            processed_at: OffsetDateTime::UNIX_EPOCH,
+            stance: Stance::Critique,
+            raw_path: Some("raw/news/post-b.md".to_string()),
+            thesis_slug: Some("post-b".to_string()),
+            x_post_id: None,
+            nostr_event_id: None,
+        };
+        store.record_processed(&record).await.unwrap();
+
+        assert!(
+            store
+                .get_processed("post123", "lens-a")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .get_processed("post123", "lens-b")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

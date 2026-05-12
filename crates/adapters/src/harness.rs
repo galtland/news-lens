@@ -140,15 +140,17 @@ impl Harness for SubprocessHarness {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let parsed = parse_raw_agent_return(&stdout);
 
         if !output.status.success() {
             return Err(HarnessError::Exit {
                 status: output.status.to_string(),
                 stderr,
+                raw: parsed.ok().map(Box::new),
             });
         }
 
-        let raw = parse_raw_agent_return(&stdout)?;
+        let raw = parsed?;
         if let Err(error) = stdin_result {
             tracing::warn!(
                 error = %error,
@@ -382,6 +384,54 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
         let result = harness.process_post(ctx).await.expect("harness result");
 
         assert_eq!(result.stance, Stance::Critique);
+    }
+
+    #[tokio::test]
+    async fn harness_preserves_contract_json_on_nonzero_exit() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = dir.path().join("wiki");
+        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
+        std::fs::write(wiki.join("raw/news/item.md"), "# News").expect("raw file");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("failing-harness.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+echo '{"stance":"decline","raw_path":"raw/news/item.md","raw_slug":"item"}'
+echo "cleanup failed" >&2
+exit 7
+"#,
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+        });
+
+        let error = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect_err("non-zero exit");
+
+        match error {
+            HarnessError::Exit { status, raw, .. } => {
+                assert!(status.contains('7'));
+                let raw = raw.expect("contract JSON");
+                assert_eq!(raw.stance.as_deref(), Some("decline"));
+                assert_eq!(raw.raw_path.as_deref(), Some("raw/news/item.md"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
