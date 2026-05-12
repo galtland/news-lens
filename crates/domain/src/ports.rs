@@ -33,6 +33,10 @@ pub trait PostSource: Send + Sync {
     ) -> Result<Vec<SourcePost>, PostSourceError>;
 
     /// Fetch a specific source post by platform ID when the adapter supports it.
+    ///
+    /// The default implementation fetches all locally available posts by passing
+    /// `"*"` to `fetch_posts`. Adapters using this default must treat that
+    /// account sentinel as "all accounts"; remote adapters should override this.
     async fn fetch_post_by_id(&self, post_id: &str) -> Result<Option<SourcePost>, PostSourceError> {
         Ok(self
             .fetch_posts("*", None)
@@ -82,8 +86,8 @@ pub enum PublishError {
 /// Result of a successful publish operation.
 #[derive(Debug, Clone)]
 pub struct PublishResult {
-    /// Platform-specific post/event ID.
-    pub id: String,
+    /// Platform-specific post/event ID, if the content was actually published.
+    pub id: Option<String>,
     /// URL to the published content, if available.
     pub url: Option<String>,
 }
@@ -91,7 +95,7 @@ pub struct PublishResult {
 /// Port for publishing rendered commentary.
 #[async_trait]
 pub trait Publisher: Send + Sync {
-    /// Publish a rendered post, returns the published ID.
+    /// Publish a rendered post.
     async fn publish(&self, post: &RenderedPost) -> Result<PublishResult, PublishError>;
 
     /// Check if this publisher is enabled.

@@ -185,6 +185,8 @@ pub enum AgentValidationError {
     EmptyPath { field: &'static str },
     #[error("{field} points outside the wiki root: {path}")]
     OutsideWikiRoot { field: &'static str, path: String },
+    #[error("wiki root does not exist or is unreadable: {path}")]
+    MissingWikiRoot { path: String },
     #[error("{field} does not exist: {path}")]
     MissingFile { field: &'static str, path: String },
 }
@@ -270,12 +272,12 @@ fn normalize_existing_wiki_file(
         });
     }
 
-    let wiki_root = wiki_root
-        .canonicalize()
-        .map_err(|_| AgentValidationError::MissingFile {
-            field,
-            path: value.to_string(),
-        })?;
+    let wiki_root =
+        wiki_root
+            .canonicalize()
+            .map_err(|_| AgentValidationError::MissingWikiRoot {
+                path: wiki_root.display().to_string(),
+            })?;
 
     let wiki_relative_path = path.strip_prefix("wiki").unwrap_or(path);
     let canonical = wiki_root
@@ -312,26 +314,18 @@ fn normalize_existing_wiki_file(
 }
 
 fn truncate_one_liner(value: &str, max_len: usize) -> String {
-    if value.len() <= max_len {
+    if value.chars().count() <= max_len {
         return value.to_string();
     }
 
     let reserve = 3;
     let limit = max_len.saturating_sub(reserve);
-    let mut cut = 0;
-    for (idx, _) in value.char_indices() {
-        if idx <= limit {
-            cut = idx;
-        } else {
-            break;
-        }
-    }
-
-    let candidate = value[..cut]
+    let prefix = value.chars().take(limit).collect::<String>();
+    let candidate = prefix
         .rfind(char::is_whitespace)
         .filter(|idx| *idx > 0)
-        .unwrap_or(cut);
-    format!("{}...", value[..candidate].trim_end())
+        .unwrap_or(prefix.len());
+    format!("{}...", prefix[..candidate].trim_end())
 }
 
 #[cfg(test)]
@@ -424,7 +418,36 @@ mod tests {
         raw.one_liner = Some("word ".repeat(80));
 
         let output = raw.validate(wiki.path()).expect("valid with truncation");
-        assert!(output.one_liner.expect("one_liner").len() <= 240);
+        assert!(output.one_liner.expect("one_liner").chars().count() <= 240);
+    }
+
+    #[test]
+    fn validation_truncates_multibyte_one_liner_by_character_count() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.one_liner = Some("é".repeat(260));
+
+        let output = raw.validate(wiki.path()).expect("valid with truncation");
+        let one_liner = output.one_liner.expect("one_liner");
+        assert!(one_liner.chars().count() <= 240);
+        assert!(one_liner.ends_with("..."));
+    }
+
+    #[test]
+    fn validation_reports_missing_wiki_root_separately() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let missing_wiki = dir.path().join("missing-wiki");
+
+        let error = valid_raw()
+            .validate(&missing_wiki)
+            .expect_err("missing wiki root");
+
+        assert_eq!(
+            error,
+            AgentValidationError::MissingWikiRoot {
+                path: missing_wiki.display().to_string()
+            }
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ impl Publisher for StubXPublisher {
         self.published.lock().unwrap().push(post.clone());
 
         Ok(PublishResult {
-            id: format!("stub_{}", post.source_post_id),
+            id: Some(format!("stub_{}", post.source_post_id)),
             url: Some(format!(
                 "https://x.com/stub/status/stub_{}",
                 post.source_post_id

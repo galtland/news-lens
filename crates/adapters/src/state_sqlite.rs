@@ -17,10 +17,17 @@ impl SqliteStateStore {
         let db_path = db_path.as_ref();
 
         if let Some(parent) = db_path.parent() {
+            if parent.as_os_str().is_empty() {
+                return Self::open(db_path).await;
+            }
             std::fs::create_dir_all(parent)
                 .map_err(|error| StateError::Database(error.to_string()))?;
         }
 
+        Self::open(db_path).await
+    }
+
+    async fn open(db_path: &Path) -> Result<Self, StateError> {
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 
         let pool = SqlitePoolOptions::new()
@@ -293,6 +300,23 @@ mod tests {
 
         let retrieved = store.get_processed("post123").await.unwrap();
         assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));
+    }
+
+    #[tokio::test]
+    async fn new_accepts_relative_db_path_without_parent() {
+        let path = std::path::PathBuf::from(format!(
+            "state-sqlite-relative-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+
+        let store = SqliteStateStore::new(&path).await.unwrap();
+        let processed = store.table_columns("processed_posts").await.unwrap();
+        assert_eq!(processed[0], "post_id");
+        drop(store);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
     }
 
     #[tokio::test]

@@ -10,7 +10,6 @@ use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxError {
@@ -124,7 +123,7 @@ impl Publisher for OutboxPublisher {
             .map_err(|error| PublishError::Api(format!("Outbox write failed: {}", error)))?;
 
         Ok(PublishResult {
-            id: Uuid::new_v4().to_string(),
+            id: None,
             url: None,
         })
     }
@@ -159,7 +158,7 @@ mod tests {
         };
 
         let result = publisher.publish(&post).await.expect("publish");
-        assert!(!result.id.is_empty());
+        assert!(result.id.is_none());
 
         let contents = tokio::fs::read_to_string(&path).await.expect("read outbox");
         let line = contents.trim();

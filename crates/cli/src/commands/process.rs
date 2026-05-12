@@ -126,7 +126,13 @@ async fn resolve_single_post(
                         );
                     }
                     Ok(None) => {}
-                    Err(error) if looks_like_x_post_id(&value) => return Err(error),
+                    Err(error) if looks_like_x_post_id(&value) => {
+                        bail!(
+                            "Failed to fetch source post id {}; use --text to process this value literally: {:#}",
+                            value,
+                            error
+                        );
+                    }
                     Err(error) => {
                         tracing::debug!(
                             error = %error,

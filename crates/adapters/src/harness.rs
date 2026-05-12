@@ -168,21 +168,42 @@ impl Harness for SubprocessHarness {
 }
 
 fn parse_raw_agent_return(stdout: &str) -> Result<RawAgentReturn, HarnessError> {
-    let Some(final_line) = stdout.lines().rev().find(|line| !line.trim().is_empty()) else {
+    let mut saw_line = false;
+    let tail = stdout_tail(stdout);
+
+    for line in stdout.lines().rev() {
+        let candidate = line.trim().trim_start_matches('\u{feff}').trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        saw_line = true;
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) else {
+            continue;
+        };
+
+        if value.get("stance").is_none() {
+            continue;
+        }
+
+        return serde_json::from_value::<RawAgentReturn>(value).map_err(|error| {
+            HarnessError::InvalidResponse(format!(
+                "contract JSON line was malformed: {}; line: {}",
+                error, candidate
+            ))
+        });
+    }
+
+    if !saw_line {
         return Err(HarnessError::InvalidResponse(
             "stdout was empty".to_string(),
         ));
-    };
-    let candidate = final_line.trim().trim_start_matches('\u{feff}').trim();
-    let tail = stdout_tail(stdout);
-    let raw = serde_json::from_str::<RawAgentReturn>(candidate).map_err(|error| {
-        HarnessError::InvalidResponse(format!(
-            "final stdout line was not contract JSON: {}; stdout tail: {}",
-            error, tail
-        ))
-    })?;
+    }
 
-    Ok(raw)
+    Err(HarnessError::InvalidResponse(format!(
+        "stdout did not contain contract JSON with a stance field; stdout tail: {}",
+        tail
+    )))
 }
 
 fn stdout_tail(stdout: &str) -> String {
@@ -390,7 +411,7 @@ diagnostic line
     }
 
     #[test]
-    fn parse_raw_agent_return_keeps_parseable_non_contract_json_for_validation() {
+    fn parse_raw_agent_return_skips_non_contract_json_after_contract_json() {
         let stdout = r#"
 {"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
 {"trace_id":"abc"}
@@ -398,21 +419,34 @@ diagnostic line
 
         let raw = parse_raw_agent_return(stdout).expect("raw JSON");
 
-        assert!(raw.stance.is_none());
-        assert!(raw.raw_path.is_none());
+        assert_eq!(raw.stance.as_deref(), Some("critique"));
+        assert_eq!(raw.thesis_slug.as_deref(), Some("item"));
     }
 
     #[test]
-    fn parse_raw_agent_return_rejects_malformed_final_line() {
+    fn parse_raw_agent_return_rejects_output_without_contract_json() {
         let stdout = r#"
-{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
+{"trace_id":"abc"}
 not json
 "#;
 
-        let error = parse_raw_agent_return(stdout).expect_err("malformed final line");
+        let error = parse_raw_agent_return(stdout).expect_err("missing contract line");
 
         assert!(
-            matches!(error, HarnessError::InvalidResponse(message) if message.contains("final stdout line"))
+            matches!(error, HarnessError::InvalidResponse(message) if message.contains("stance field"))
+        );
+    }
+
+    #[test]
+    fn parse_raw_agent_return_rejects_malformed_contract_json_line() {
+        let stdout = r#"
+{"stance":123,"raw_path":"raw/news/item.md"}
+"#;
+
+        let error = parse_raw_agent_return(stdout).expect_err("malformed contract line");
+
+        assert!(
+            matches!(error, HarnessError::InvalidResponse(message) if message.contains("contract JSON line was malformed"))
         );
     }
 }

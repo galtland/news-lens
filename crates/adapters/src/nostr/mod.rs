@@ -278,7 +278,7 @@ impl Publisher for NostrPublisher {
         }
 
         Ok(PublishResult {
-            id: event_id,
+            id: Some(event_id),
             url: None, // Nostr doesn't have a canonical URL
         })
     }
@@ -357,7 +357,7 @@ mod tests {
 
         let result = publisher.publish(&sample_post()).await.unwrap();
 
-        assert_eq!(result.id.len(), 64);
+        assert_eq!(result.id.as_deref().expect("event id").len(), 64);
     }
 
     #[test]

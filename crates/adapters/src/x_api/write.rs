@@ -167,7 +167,7 @@ impl Publisher for XPublisher {
         // The URL format assumes we know the author, which we don't have here
         // A real implementation would need to also fetch user info
         Ok(PublishResult {
-            id: tweet_response.data.id.clone(),
+            id: Some(tweet_response.data.id.clone()),
             url: Some(format!("https://x.com/i/status/{}", tweet_response.data.id)),
         })
     }
@@ -283,7 +283,7 @@ mod tests {
 
         let result = publisher.publish(&sample_post()).await.unwrap();
 
-        assert_eq!(result.id, "new_tweet_id");
+        assert_eq!(result.id.as_deref(), Some("new_tweet_id"));
         assert!(result.url.is_some());
     }
 
@@ -315,7 +315,7 @@ mod tests {
 
         let result = publisher.publish(&sample_post()).await.unwrap();
 
-        assert_eq!(result.id, "quoted_tweet_id");
+        assert_eq!(result.id.as_deref(), Some("quoted_tweet_id"));
     }
 
     #[tokio::test]
@@ -345,7 +345,7 @@ mod tests {
 
         let result = publisher.publish(&sample_post()).await.unwrap();
 
-        assert_eq!(result.id, "new_post_id");
+        assert_eq!(result.id.as_deref(), Some("new_post_id"));
     }
 
     #[test]

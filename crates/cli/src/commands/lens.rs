@@ -60,8 +60,15 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-            if let Ok(lens) = load_lens(&path) {
-                lenses.push(lens);
+            match load_lens(&path) {
+                Ok(lens) => lenses.push(lens),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "Skipping invalid lens file"
+                    );
+                }
             }
         }
     }

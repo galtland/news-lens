@@ -286,7 +286,7 @@ where
 
                 if self.x_publisher.is_enabled() {
                     match self.x_publisher.publish(&rendered).await {
-                        Ok(result) => x_post_id = Some(result.id),
+                        Ok(result) => x_post_id = result.id,
                         Err(error) => {
                             tracing::error!(error = %error, "Failed to publish to X");
                             publish_errors.push(format!("X publish failed: {}", error));
@@ -297,7 +297,7 @@ where
                 if self.nostr_publisher.is_enabled() {
                     let rendered = render_nostr_note(post, &agent_return);
                     match self.nostr_publisher.publish(&rendered).await {
-                        Ok(result) => nostr_event_id = Some(result.id),
+                        Ok(result) => nostr_event_id = result.id,
                         Err(error) => {
                             tracing::error!(error = %error, "Failed to publish to Nostr");
                             publish_errors.push(format!("Nostr publish failed: {}", error));
@@ -631,7 +631,7 @@ mod tests {
             }
             self.published.lock().unwrap().push(post.clone());
             Ok(PublishResult {
-                id: "published-id".to_string(),
+                id: Some("published-id".to_string()),
                 url: None,
             })
         }
