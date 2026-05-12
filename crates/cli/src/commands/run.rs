@@ -9,7 +9,7 @@ use news_lens_domain::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::interval;
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::args::RunArgs;
 use crate::commands::common::{
@@ -72,6 +72,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
 
     let poll_interval = Duration::from_secs(config.watch.poll_interval_secs);
     let mut ticker = interval(poll_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     let shutdown = async {
         tokio::signal::ctrl_c()
@@ -83,15 +84,17 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
 
     loop {
         tokio::select! {
+            biased;
+
+            _ = &mut shutdown => {
+                tracing::info!("Shutting down gracefully");
+                break;
+            }
             _ = ticker.tick() => {
                 match run_loop.poll_once().await {
                     Ok(results) => log_results(&results),
                     Err(error) => tracing::error!(error = %error, "Poll cycle failed"),
                 }
-            }
-            _ = &mut shutdown => {
-                tracing::info!("Shutting down gracefully");
-                break;
             }
         }
     }

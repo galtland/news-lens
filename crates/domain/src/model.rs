@@ -170,12 +170,17 @@ impl RawAgentReturn {
             .map(|path| normalize_existing_wiki_file(wiki_root, "thesis_path", &path))
             .transpose()?;
 
+        let thesis_slug = self
+            .thesis_slug
+            .map(|slug| slug.trim().to_string())
+            .filter(|slug| !slug.is_empty());
+
         Ok(AgentReturn {
             stance,
             raw_path,
             raw_slug: self.raw_slug,
             thesis_path,
-            thesis_slug: self.thesis_slug,
+            thesis_slug,
             one_liner,
         })
     }
@@ -472,6 +477,32 @@ mod tests {
         raw.thesis_slug = Some("  item \n".to_string());
 
         let output = raw.validate(wiki.path()).expect("valid thesis_slug");
+        assert_eq!(output.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[test]
+    fn validation_drops_blank_optional_thesis_slug_on_decline_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("decline".to_string());
+        raw.thesis_path = None;
+        raw.thesis_slug = Some(" \n\t ".to_string());
+        raw.one_liner = None;
+
+        let output = raw.validate(wiki.path()).expect("valid decline");
+        assert!(output.thesis_slug.is_none());
+    }
+
+    #[test]
+    fn validation_trims_optional_thesis_slug_on_failed_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("failed".to_string());
+        raw.thesis_path = Some("theses/item.md".to_string());
+        raw.thesis_slug = Some(" item \n".to_string());
+        raw.one_liner = None;
+
+        let output = raw.validate(wiki.path()).expect("valid failed");
         assert_eq!(output.thesis_slug.as_deref(), Some("item"));
     }
 

@@ -187,17 +187,17 @@ impl NostrPublisher {
 
     /// Publish event to a relay via NIP-01 WebSocket.
     async fn publish_to_relay(&self, relay: &str, event: &NostrEvent) -> Result<(), PublishError> {
-        let (mut socket, _) = connect_async(relay)
-            .await
-            .map_err(|e| PublishError::Api(format!("Failed to connect to relay: {}", e)))?;
-
-        let request = serde_json::json!(["EVENT", event]);
-        socket
-            .send(Message::Text(request.to_string().into()))
-            .await
-            .map_err(|e| PublishError::Api(format!("Failed to send event to relay: {}", e)))?;
-
         timeout(RELAY_ACK_TIMEOUT, async {
+            let (mut socket, _) = connect_async(relay)
+                .await
+                .map_err(|e| PublishError::Api(format!("Failed to connect to relay: {}", e)))?;
+
+            let request = serde_json::json!(["EVENT", event]);
+            socket
+                .send(Message::Text(request.to_string().into()))
+                .await
+                .map_err(|e| PublishError::Api(format!("Failed to send event to relay: {}", e)))?;
+
             let mut last_notice = None;
 
             loop {
@@ -240,7 +240,7 @@ impl NostrPublisher {
             }
         })
         .await
-        .map_err(|_| PublishError::Api("Timed out waiting for relay OK".to_string()))?
+        .map_err(|_| PublishError::Api("Timed out publishing to relay".to_string()))?
     }
 }
 
