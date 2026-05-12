@@ -177,6 +177,30 @@ impl XPostSource {
         parse_x_response(response, "users/:id/tweets").await
     }
 
+    async fn fetch_posts_batch_for_user(
+        &self,
+        account: &str,
+        user_id: &str,
+        since_id: Option<&str>,
+    ) -> Result<PostFetchBatch, PostSourceError> {
+        let cursor = TimelineCursor::from_state(since_id)?;
+        tracing::info!(account = %account, since_id = ?cursor.since_id, "Fetching posts from X");
+
+        let TimelineFetch {
+            mut posts,
+            next_since_id,
+        } = self.fetch_user_tweets(user_id, account, &cursor).await?;
+
+        posts.sort_by(|a, b| compare_post_ids(&a.id, &b.id));
+
+        tracing::info!(account = %account, count = posts.len(), "Fetched posts");
+
+        Ok(PostFetchBatch {
+            posts,
+            next_since_id,
+        })
+    }
+
     /// Fetch a tweet directly by ID.
     async fn fetch_tweet_by_id(
         &self,
@@ -457,10 +481,11 @@ impl PostSource for XPostSource {
     ) -> Result<Vec<SourcePost>, PostSourceError> {
         let mut posts = Vec::new();
         let mut next_since_id = since_id.map(str::to_string);
+        let user_id = self.get_user_id(account).await?;
 
         loop {
             let batch = self
-                .fetch_posts_batch(account, next_since_id.as_deref())
+                .fetch_posts_batch_for_user(account, &user_id, next_since_id.as_deref())
                 .await?;
             posts.extend(batch.posts);
 
@@ -482,26 +507,9 @@ impl PostSource for XPostSource {
         account: &str,
         since_id: Option<&str>,
     ) -> Result<PostFetchBatch, PostSourceError> {
-        let cursor = TimelineCursor::from_state(since_id)?;
-        tracing::info!(account = %account, since_id = ?cursor.since_id, "Fetching posts from X");
-        // Get user ID from username
         let user_id = self.get_user_id(account).await?;
-
-        // Fetch tweets
-        let TimelineFetch {
-            mut posts,
-            next_since_id,
-        } = self.fetch_user_tweets(&user_id, account, &cursor).await?;
-
-        // Sort by ID (which is chronological) ascending
-        posts.sort_by(|a, b| compare_post_ids(&a.id, &b.id));
-
-        tracing::info!(account = %account, count = posts.len(), "Fetched posts");
-
-        Ok(PostFetchBatch {
-            posts,
-            next_since_id,
-        })
+        self.fetch_posts_batch_for_user(account, &user_id, since_id)
+            .await
     }
 
     async fn fetch_post_by_id(&self, post_id: &str) -> Result<Option<SourcePost>, PostSourceError> {
@@ -531,6 +539,7 @@ mod tests {
                     "id": "123456789"
                 }
             })))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
@@ -581,6 +590,7 @@ mod tests {
                     "id": "123456789"
                 }
             })))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
@@ -745,6 +755,7 @@ mod tests {
                     "id": "123456789"
                 }
             })))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
