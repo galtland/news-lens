@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use news_lens_adapters::lens::load_lens;
 use news_lens_domain::Lens;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::args::{LensArgs, LensCommands};
@@ -36,10 +37,11 @@ pub async fn execute(args: LensArgs, config_path: Option<PathBuf>) -> Result<()>
 }
 
 fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
-    let mut lenses = Vec::new();
+    let mut lenses = HashMap::new();
 
     if configured_path.is_file() {
-        lenses.push(load_lens(configured_path)?);
+        let lens = load_lens(configured_path)?;
+        lenses.insert(lens.id.clone(), lens);
     }
 
     let parent = configured_path
@@ -51,6 +53,8 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
         if lenses.is_empty() {
             bail!("Lens directory does not exist: {}", parent.display());
         }
+        let mut lenses = lenses.into_values().collect::<Vec<_>>();
+        lenses.sort_by(|a, b| a.id.cmp(&b.id));
         return Ok(lenses);
     }
 
@@ -62,7 +66,9 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
         }
         if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
             match load_lens(&path) {
-                Ok(lens) => lenses.push(lens),
+                Ok(lens) => {
+                    lenses.entry(lens.id.clone()).or_insert(lens);
+                }
                 Err(error) => {
                     tracing::warn!(
                         path = %path.display(),
@@ -74,8 +80,8 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
         }
     }
 
+    let mut lenses = lenses.into_values().collect::<Vec<_>>();
     lenses.sort_by(|a, b| a.id.cmp(&b.id));
-    lenses.dedup_by(|a, b| a.id == b.id);
     Ok(lenses)
 }
 
@@ -86,5 +92,29 @@ mod tests {
     #[test]
     fn discover_lenses_treats_bare_relative_parent_as_current_directory() {
         discover_lenses(Path::new("lens.md")).expect("bare relative path");
+    }
+
+    #[test]
+    fn discover_lenses_prefers_configured_path_on_duplicate_id() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let configured_path = dir.path().join("configured.md");
+        let scanned_path = dir.path().join("scanned.md");
+
+        std::fs::write(
+            &configured_path,
+            "---\nid: duplicate\nvoice: configured\n---\n\n# Configured\n",
+        )
+        .expect("configured lens");
+        std::fs::write(
+            &scanned_path,
+            "---\nid: duplicate\nvoice: scanned\n---\n\n# Scanned\n",
+        )
+        .expect("scanned lens");
+
+        let lenses = discover_lenses(&configured_path).expect("lenses");
+
+        assert_eq!(lenses.len(), 1);
+        assert_eq!(lenses[0].path, configured_path);
+        assert_eq!(lenses[0].voice.as_deref(), Some("configured"));
     }
 }
