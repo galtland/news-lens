@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Prompt shipped with the binary for `config init` installations.
+pub const SHIPPED_PROCESS_PROMPT: &str = include_str!("../../../prompts/process-post.md");
+
 /// Top-level configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -310,9 +313,12 @@ impl AppConfig {
 
         let config = builder.build().context("Failed to build configuration")?;
 
-        config
+        let config: Self = config
             .try_deserialize()
-            .context("Failed to deserialize configuration")
+            .context("Failed to deserialize configuration")?;
+
+        config.validate()?;
+        Ok(config)
     }
 
     /// Load only enough configuration to choose a logging fallback.
@@ -322,11 +328,11 @@ impl AppConfig {
             .map(|config| config.general.log_level)
     }
 
-    /// Generate example configuration as TOML.
-    pub fn example_toml() -> String {
+    /// Generate example configuration as TOML with an explicit prompt template path.
+    pub fn example_toml_with_prompt_template(prompt_template_path: &Path) -> String {
         let wiki_path = escape_toml_string(&default_wiki_path().display().to_string());
         let lens_path = escape_toml_string(&default_lens_path().display().to_string());
-        let prompt_template = escape_toml_string(&default_prompt_template().display().to_string());
+        let prompt_template = escape_toml_string(&prompt_template_path.display().to_string());
 
         format!(
             r#"# news-lens configuration
@@ -371,5 +377,37 @@ secret_key_env = "NOSTR_NSEC"
 relays = ["wss://relay.damus.io"]
 "#
         )
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.watch.poll_interval_secs == 0 {
+            anyhow::bail!("watch.poll_interval_secs must be greater than 0");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_rejects_zero_poll_interval() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[watch]\npoll_interval_secs = 0\n").expect("write config");
+
+        let error = AppConfig::load(Some(&path)).expect_err("invalid config");
+
+        assert!(error.to_string().contains("poll_interval_secs"));
+    }
+
+    #[test]
+    fn example_toml_can_use_explicit_prompt_path() {
+        let prompt_path = PathBuf::from("/tmp/news-lens/process-post.md");
+
+        let toml = AppConfig::example_toml_with_prompt_template(&prompt_path);
+
+        assert!(toml.contains("prompt_template = \"/tmp/news-lens/process-post.md\""));
     }
 }

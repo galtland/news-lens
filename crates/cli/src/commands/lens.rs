@@ -56,13 +56,10 @@ fn discover_lenses(configured_path: &Path) -> Result<Vec<Lens>> {
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
         if !path.is_file() || path == configured_path {
             continue;
         }
-        if name.starts_with("lens") && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
             if let Ok(lens) = load_lens(&path) {
                 lenses.push(lens);
             }

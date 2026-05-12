@@ -119,12 +119,8 @@ where
         let mut results = Vec::new();
 
         for account in &self.config.accounts {
-            match self.poll_account(account).await {
-                Ok(account_results) => results.extend(account_results),
-                Err(error) => {
-                    tracing::error!(account = %account, error = %error, "Failed to poll account");
-                }
-            }
+            let account_results = self.poll_account(account).await?;
+            results.extend(account_results);
         }
 
         Ok(results)
@@ -139,7 +135,7 @@ where
         for post in self.filter_posts(posts) {
             self.rate_limiter.acquire().await;
             let post_id = post.id.clone();
-            let result = self.process_post(&post).await;
+            let result = self.process_post(&post).await?;
             results.push((post_id, result));
         }
         Ok(results)
@@ -178,7 +174,7 @@ where
         for post in filtered_posts {
             self.rate_limiter.acquire().await;
             let post_id = post.id.clone();
-            let result = self.process_post(&post).await;
+            let result = self.process_post(&post).await?;
             results.push((post_id, result));
         }
 
@@ -219,16 +215,14 @@ where
             .collect()
     }
 
-    async fn process_post(&self, post: &SourcePost) -> ProcessResult {
+    async fn process_post(&self, post: &SourcePost) -> Result<ProcessResult, RunLoopError> {
         match self.state_store.is_processed(&post.id).await {
             Ok(true) => {
-                return ProcessResult::Skipped {
+                return Ok(ProcessResult::Skipped {
                     reason: "Already processed".to_string(),
-                };
+                });
             }
-            Err(error) => {
-                tracing::warn!(error = %error, "Failed to check processed state, continuing");
-            }
+            Err(error) => return Err(state_error(error)),
             Ok(false) => {}
         }
 
@@ -243,16 +237,18 @@ where
             Ok(agent_return) => agent_return,
             Err(error) => {
                 let message = format!("Harness failed: {}", error);
-                if let Err(state_error) = self.record_failed(post).await {
-                    tracing::error!(error = %state_error, "Failed to record harness failure");
-                }
-                return ProcessResult::Failed { error: message };
+                self.record_failed(post).await.map_err(state_error)?;
+                return Ok(ProcessResult::Failed { error: message });
             }
         };
 
         let mut x_post_id = None;
         let mut nostr_event_id = None;
         let mut publish_errors = Vec::new();
+        let should_publish = agent_return.stance != Stance::Decline
+            && agent_return.stance != Stance::Failed
+            && !self.config.dry_run
+            && (self.x_publisher.is_enabled() || self.nostr_publisher.is_enabled());
 
         if agent_return.stance != Stance::Decline && agent_return.stance != Stance::Failed {
             if self.config.dry_run {
@@ -261,7 +257,11 @@ where
                     one_liner = ?agent_return.one_liner,
                     "[DRY RUN] Would publish commentary"
                 );
-            } else {
+            } else if should_publish {
+                self.record_agent_return(post, &agent_return, None, None)
+                    .await
+                    .map_err(state_error)?;
+
                 let rendered = render_reply(post, &agent_return);
 
                 if self.x_publisher.is_enabled() {
@@ -286,43 +286,33 @@ where
             }
         }
 
-        if !publish_errors.is_empty() {
-            let message = publish_errors.join("; ");
-            if let Err(state_error) = self
-                .record_publish_failure(
-                    post,
-                    &agent_return,
-                    x_post_id.clone(),
-                    nostr_event_id.clone(),
-                )
+        if should_publish || !publish_errors.is_empty() {
+            self.record_agent_return(
+                post,
+                &agent_return,
+                x_post_id.clone(),
+                nostr_event_id.clone(),
+            )
+            .await
+            .map_err(state_error)?;
+        } else {
+            self.record_agent_return(post, &agent_return, None, None)
                 .await
-            {
-                tracing::error!(error = %state_error, "Failed to record publish failure");
-            }
-            return ProcessResult::Failed { error: message };
+                .map_err(state_error)?;
         }
 
-        let record = ProcessedPostRecord {
-            post_id: post.id.clone(),
-            lens_id: self.config.lens.id.clone(),
-            processed_at: self.clock.now(),
-            stance: agent_return.stance,
-            raw_path: Some(agent_return.raw_path.clone()),
-            thesis_slug: agent_return.thesis_slug.clone(),
-            x_post_id: x_post_id.clone(),
-            nostr_event_id: nostr_event_id.clone(),
-        };
-
-        if let Err(error) = self.state_store.record_processed(&record).await {
-            tracing::error!(error = %error, "Failed to record processed state");
+        if !publish_errors.is_empty() {
+            return Ok(ProcessResult::Failed {
+                error: publish_errors.join("; "),
+            });
         }
 
-        ProcessResult::Processed {
+        Ok(ProcessResult::Processed {
             source_post: Box::new(post.clone()),
             agent_return,
             x_post_id,
             nostr_event_id,
-        }
+        })
     }
 
     async fn record_failed(&self, post: &SourcePost) -> Result<(), StateError> {
@@ -339,7 +329,7 @@ where
         self.state_store.record_processed(&record).await
     }
 
-    async fn record_publish_failure(
+    async fn record_agent_return(
         &self,
         post: &SourcePost,
         agent_return: &AgentReturn,
@@ -350,7 +340,7 @@ where
             post_id: post.id.clone(),
             lens_id: self.config.lens.id.clone(),
             processed_at: self.clock.now(),
-            stance: Stance::Failed,
+            stance: agent_return.stance,
             raw_path: Some(agent_return.raw_path.clone()),
             thesis_slug: agent_return.thesis_slug.clone(),
             x_post_id,
@@ -367,6 +357,10 @@ pub enum RunLoopError {
     PostSource(String),
     #[error("State error: {0}")]
     State(String),
+}
+
+fn state_error(error: StateError) -> RunLoopError {
+    RunLoopError::State(error.to_string())
 }
 
 #[derive(Debug)]
@@ -570,6 +564,33 @@ mod tests {
     struct FakeStateStore {
         accounts: StdMutex<HashMap<String, AccountState>>,
         processed: StdMutex<HashMap<String, ProcessedPostRecord>>,
+        fail_is_processed: bool,
+        record_failures_remaining: StdMutex<usize>,
+    }
+
+    impl FakeStateStore {
+        fn new() -> Self {
+            Self {
+                accounts: StdMutex::new(HashMap::new()),
+                processed: StdMutex::new(HashMap::new()),
+                fail_is_processed: false,
+                record_failures_remaining: StdMutex::new(0),
+            }
+        }
+
+        fn with_is_processed_failure() -> Self {
+            Self {
+                fail_is_processed: true,
+                ..Self::new()
+            }
+        }
+
+        fn with_record_failures(count: usize) -> Self {
+            Self {
+                record_failures_remaining: StdMutex::new(count),
+                ..Self::new()
+            }
+        }
     }
 
     #[async_trait]
@@ -590,10 +611,20 @@ mod tests {
         }
 
         async fn is_processed(&self, post_id: &str) -> Result<bool, StateError> {
+            if self.fail_is_processed {
+                return Err(StateError::Database("is_processed failed".to_string()));
+            }
             Ok(self.processed.lock().unwrap().contains_key(post_id))
         }
 
         async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
+            let mut failures = self.record_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(StateError::Database("record_processed failed".to_string()));
+            }
+            drop(failures);
+
             self.processed
                 .lock()
                 .unwrap()
@@ -654,10 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_once_processes_posts_serially_and_records_state() {
-        let state = Arc::new(FakeStateStore {
-            accounts: StdMutex::new(HashMap::new()),
-            processed: StdMutex::new(HashMap::new()),
-        });
+        let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
             enabled: false,
             fail_message: None,
@@ -695,10 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_once_advances_cursor_past_filtered_posts() {
-        let state = Arc::new(FakeStateStore {
-            accounts: StdMutex::new(HashMap::new()),
-            processed: StdMutex::new(HashMap::new()),
-        });
+        let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
             enabled: false,
             fail_message: None,
@@ -741,11 +766,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publisher_failure_records_failed_state() {
-        let state = Arc::new(FakeStateStore {
-            accounts: StdMutex::new(HashMap::new()),
-            processed: StdMutex::new(HashMap::new()),
-        });
+    async fn publisher_failure_records_processed_stance_without_retrying() {
+        let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
             enabled: true,
             fail_message: Some("outbox unavailable".to_string()),
@@ -786,9 +808,89 @@ mod tests {
             .await
             .expect("state")
             .expect("recorded failure");
-        assert_eq!(record.stance, Stance::Failed);
+        assert_eq!(record.stance, Stance::Critique);
         assert_eq!(record.raw_path.as_deref(), Some("raw/news/item.md"));
         assert_eq!(record.thesis_slug.as_deref(), Some("item"));
+    }
+
+    #[tokio::test]
+    async fn state_read_error_fails_without_processing() {
+        let state = Arc::new(FakeStateStore::with_is_processed_failure());
+        let x = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x,
+            nostr,
+            state,
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let error = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect_err("state error");
+
+        assert!(matches!(error, RunLoopError::State(message) if message.contains("is_processed")));
+    }
+
+    #[tokio::test]
+    async fn state_write_error_fails_before_publishing() {
+        let state = Arc::new(FakeStateStore::with_record_failures(1));
+        let x = Arc::new(FakePublisher {
+            enabled: true,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let nostr = Arc::new(FakePublisher {
+            enabled: false,
+            fail_message: None,
+            published: StdMutex::new(vec![]),
+        });
+        let run_loop = RunLoop::new(
+            Arc::new(FakePostSource {
+                posts: vec![sample_post("1")],
+            }),
+            Arc::new(FakeHarness {
+                result: sample_agent_return(),
+            }),
+            x.clone(),
+            nostr,
+            state,
+            Arc::new(FixedClock),
+            RunLoopConfig {
+                dry_run: false,
+                lens: sample_lens(),
+                ..Default::default()
+            },
+        );
+
+        let error = run_loop
+            .process_posts(vec![sample_post("1")])
+            .await
+            .expect_err("state error");
+
+        assert!(
+            matches!(error, RunLoopError::State(message) if message.contains("record_processed"))
+        );
+        assert!(x.published.lock().unwrap().is_empty());
     }
 
     #[test]

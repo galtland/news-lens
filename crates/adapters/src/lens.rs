@@ -39,15 +39,29 @@ struct Frontmatter<'a> {
 }
 
 fn parse_frontmatter(content: &str) -> Frontmatter<'_> {
-    if !content.starts_with("---") {
-        return Frontmatter::default();
-    }
-
-    let mut parts = content.splitn(3, "---");
-    let _ = parts.next();
-    let Some(frontmatter) = parts.next() else {
+    let Some(rest) = content.strip_prefix("---") else {
         return Frontmatter::default();
     };
+
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+        .unwrap_or(rest);
+
+    let mut end = None;
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim() == "---" {
+            end = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+
+    let Some(end) = end else {
+        return Frontmatter::default();
+    };
+    let frontmatter = &rest[..end];
 
     let mut parsed = Frontmatter::default();
     for line in frontmatter.lines() {
@@ -87,5 +101,18 @@ mod tests {
         assert_eq!(lens.voice.as_deref(), Some("terse"));
         assert_eq!(lens.register.as_deref(), Some("written"));
         assert_eq!(lens.content, content);
+    }
+
+    #[test]
+    fn frontmatter_values_can_contain_dashes() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("lens.md");
+        let content = "---\nid: test\nvoice: terse --- dry\nregister: written\n---\n\n# Policy\n";
+        std::fs::write(&path, content).expect("write lens");
+
+        let lens = load_lens(&path).expect("lens");
+
+        assert_eq!(lens.id, "test");
+        assert_eq!(lens.voice.as_deref(), Some("terse --- dry"));
     }
 }

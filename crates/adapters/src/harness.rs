@@ -150,12 +150,12 @@ impl Harness for SubprocessHarness {
 
         let raw = parse_raw_agent_return(&stdout)?;
         if let Err(error) = stdin_result {
-            return Err(HarnessError::Io(format!(
-                "stdin write failed: {}; stdout tail: {}; stderr: {}",
-                error,
-                stdout_tail(&stdout),
-                stderr
-            )));
+            tracing::warn!(
+                error = %error,
+                stdout_tail = %stdout_tail(&stdout),
+                stderr = %stderr,
+                "Harness stdin write failed after valid response"
+            );
         }
 
         raw.validate(&ctx.wiki_path)
@@ -324,6 +324,46 @@ sleep 5
 
         let error = harness.process_post(ctx).await.expect_err("timeout");
         assert!(matches!(error, HarnessError::Timeout { timeout_secs: 1 }));
+    }
+
+    #[tokio::test]
+    async fn harness_accepts_valid_json_when_child_closes_stdin_early() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = dir.path().join("wiki");
+        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
+        std::fs::create_dir_all(wiki.join("theses")).expect("theses dir");
+        std::fs::write(wiki.join("raw/news/item.md"), "# News").expect("raw file");
+        std::fs::write(wiki.join("theses/item.md"), "# Thesis").expect("thesis file");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{LENS_CONTENT}}").expect("prompt");
+
+        let script = dir.path().join("early-close-harness.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+exec 0<&-
+echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}'
+"#,
+        )
+        .expect("script");
+        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+
+        let mut ctx = make_context(wiki, dir.path().join("lens.md"));
+        ctx.lens.content = "x".repeat(2_000_000);
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+        });
+
+        let result = harness.process_post(ctx).await.expect("harness result");
+
+        assert_eq!(result.stance, Stance::Critique);
     }
 
     #[test]

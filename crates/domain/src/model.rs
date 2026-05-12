@@ -158,11 +158,16 @@ impl RawAgentReturn {
             });
         }
 
+        let thesis_path = self
+            .thesis_path
+            .map(|path| normalize_existing_wiki_file(wiki_root, "thesis_path", &path))
+            .transpose()?;
+
         Ok(AgentReturn {
             stance,
             raw_path,
             raw_slug: self.raw_slug,
-            thesis_path: self.thesis_path,
+            thesis_path,
             thesis_slug: self.thesis_slug,
             one_liner,
         })
@@ -176,6 +181,8 @@ pub enum AgentValidationError {
     MissingField(&'static str),
     #[error("invalid stance: {0}")]
     InvalidStance(String),
+    #[error("{field} is empty")]
+    EmptyPath { field: &'static str },
     #[error("{field} points outside the wiki root: {path}")]
     OutsideWikiRoot { field: &'static str, path: String },
     #[error("{field} does not exist: {path}")]
@@ -248,8 +255,11 @@ fn normalize_existing_wiki_file(
     value: &str,
 ) -> Result<String, AgentValidationError> {
     let path = Path::new(value);
+    if value.trim().is_empty() {
+        return Err(AgentValidationError::EmptyPath { field });
+    }
+
     if path.is_absolute()
-        || value.trim().is_empty()
         || path
             .components()
             .any(|component| matches!(component, Component::ParentDir))
@@ -434,6 +444,33 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_empty_raw_path() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.raw_path = Some(String::new());
+
+        let error = raw.validate(wiki.path()).expect_err("empty raw path");
+        assert_eq!(error, AgentValidationError::EmptyPath { field: "raw_path" });
+    }
+
+    #[test]
+    fn validation_checks_optional_decline_thesis_path_when_present() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("decline".to_string());
+        raw.thesis_path = Some("theses/missing.md".to_string());
+
+        let error = raw.validate(wiki.path()).expect_err("missing thesis file");
+        assert_eq!(
+            error,
+            AgentValidationError::MissingFile {
+                field: "thesis_path",
+                path: "theses/missing.md".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn validation_normalizes_wiki_prefixed_paths() {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
@@ -469,16 +506,6 @@ mod tests {
         parent.raw_path = Some("../outside.md".to_string());
         assert!(matches!(
             parent.validate(wiki.path()),
-            Err(AgentValidationError::OutsideWikiRoot {
-                field: "raw_path",
-                ..
-            })
-        ));
-
-        let mut empty = valid_raw();
-        empty.raw_path = Some(String::new());
-        assert!(matches!(
-            empty.validate(wiki.path()),
             Err(AgentValidationError::OutsideWikiRoot {
                 field: "raw_path",
                 ..

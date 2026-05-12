@@ -95,6 +95,8 @@ pub async fn execute(args: DoctorArgs, config_path: Option<PathBuf>) -> Result<(
         &report.lens,
         &report.harness,
         &report.x_read,
+        &report.x_write,
+        &report.nostr,
     ];
     let has_error = checks.iter().any(|check| check.is_error());
     let all_ok = checks.iter().all(|check| check.is_ok());

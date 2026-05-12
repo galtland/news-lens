@@ -54,10 +54,9 @@ pub async fn build_publishers(
 
     if require_approval {
         if !config.x.write.enabled && !config.nostr.enabled {
-            return Ok((
-                Arc::new(XPublisher::disabled()),
-                Arc::new(NostrPublisher::disabled()),
-            ));
+            bail!(
+                "--require-approval requires at least one enabled publisher in [x.write] or [nostr]"
+            );
         }
 
         let outbox_path = outbox_path.unwrap_or_else(default_outbox_path);
