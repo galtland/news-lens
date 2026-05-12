@@ -42,10 +42,8 @@ bech32 = { workspace = true }
 # Secrets
 secrecy = { workspace = true }
 
-# UUID
-uuid = { workspace = true }
-
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = { workspace = true }
 tempfile = { workspace = true }
+uuid = { workspace = true }

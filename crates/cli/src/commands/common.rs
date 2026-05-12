@@ -55,8 +55,6 @@ pub async fn build_publishers(
     require_approval: bool,
     outbox_path: Option<PathBuf>,
 ) -> Result<(Arc<dyn Publisher>, Arc<dyn Publisher>)> {
-    let x_mode = parse_x_publish_mode(&config.x.write.mode)?;
-
     if require_approval {
         if !config.x.write.enabled && !config.nostr.enabled {
             bail!(
@@ -72,6 +70,7 @@ pub async fn build_publishers(
         tracing::info!(outbox = %outbox_path.display(), "Writing approvals to outbox");
 
         let x_publisher: Arc<dyn Publisher> = if config.x.write.enabled {
+            let x_mode = parse_x_publish_mode(&config.x.write.mode)?;
             Arc::new(OutboxPublisher::new_x(
                 writer.clone(),
                 x_mode,
@@ -90,7 +89,7 @@ pub async fn build_publishers(
         return Ok((x_publisher, nostr_publisher));
     }
 
-    let x_publisher: Arc<dyn Publisher> = Arc::new(build_x_publisher(config, dry_run, x_mode)?);
+    let x_publisher: Arc<dyn Publisher> = Arc::new(build_x_publisher(config, dry_run)?);
     let nostr_publisher: Arc<dyn Publisher> = Arc::new(build_nostr_publisher(config, dry_run)?);
     Ok((x_publisher, nostr_publisher))
 }
@@ -131,11 +130,12 @@ pub fn load_api_key(env_var: &str, provider: &str) -> Result<SecretString> {
     Ok(SecretString::new(key.into()))
 }
 
-fn build_x_publisher(config: &AppConfig, dry_run: bool, mode: XPublishMode) -> Result<XPublisher> {
+fn build_x_publisher(config: &AppConfig, dry_run: bool) -> Result<XPublisher> {
     if dry_run || !config.x.write.enabled {
         return Ok(XPublisher::disabled());
     }
 
+    let mode = parse_x_publish_mode(&config.x.write.mode)?;
     let user_token = load_api_key(&config.x.write.oauth2_user_token_env, "x_write")?;
     Ok(XPublisher::new(user_token, mode, config.x.write.max_chars))
 }
@@ -164,4 +164,57 @@ fn parse_x_publish_mode(mode: &str) -> Result<XPublishMode> {
 
 fn default_outbox_path() -> PathBuf {
     PathBuf::from("./outbox.jsonl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn build_publishers_ignores_invalid_x_mode_when_x_disabled_in_dry_run() {
+        let mut config = AppConfig::default();
+        config.x.write.enabled = false;
+        config.x.write.mode = "stale-mode".to_string();
+
+        let (x_publisher, nostr_publisher) = build_publishers(&config, true, false, None)
+            .await
+            .expect("publishers");
+
+        assert!(!x_publisher.is_enabled());
+        assert!(!nostr_publisher.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn build_publishers_ignores_invalid_x_mode_for_nostr_only_approval() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let outbox_path = dir.path().join("outbox.jsonl");
+        let mut config = AppConfig::default();
+        config.x.write.enabled = false;
+        config.x.write.mode = "stale-mode".to_string();
+        config.nostr.enabled = true;
+
+        let (x_publisher, nostr_publisher) =
+            build_publishers(&config, false, true, Some(outbox_path))
+                .await
+                .expect("publishers");
+
+        assert!(!x_publisher.is_enabled());
+        assert!(nostr_publisher.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn build_publishers_rejects_invalid_x_mode_when_x_approval_is_enabled() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let outbox_path = dir.path().join("outbox.jsonl");
+        let mut config = AppConfig::default();
+        config.x.write.enabled = true;
+        config.x.write.mode = "stale-mode".to_string();
+
+        let error = match build_publishers(&config, false, true, Some(outbox_path)).await {
+            Ok(_) => panic!("invalid x mode should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("Invalid X publish mode"));
+    }
 }
