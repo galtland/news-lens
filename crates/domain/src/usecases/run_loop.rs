@@ -254,6 +254,9 @@ where
         let agent_return = match self.harness.process_post(ctx).await {
             Ok(agent_return) => agent_return,
             Err(error @ HarnessError::InvalidTemplate(_)) => {
+                // SubprocessHarness validates its template at construction. Keep this arm for
+                // alternate Harness implementations so config mistakes do not get recorded as
+                // post-level processing failures or advance the account cursor.
                 return Err(RunLoopError::HarnessConfig(error.to_string()));
             }
             Err(error) => {
