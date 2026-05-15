@@ -22,6 +22,7 @@ const ALLOWED_TEMPLATE_TOKENS: &[&str] = &[
     "{{LENS_REGISTER}}",
     "{{LENS_CONTENT}}",
     "{{CANDIDATE_SLUG}}",
+    "{{PUBLIC_BASE_URL}}",
 ];
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,10 @@ pub struct HarnessConfig {
     pub args: Vec<String>,
     pub prompt_template: PathBuf,
     pub timeout_secs: u64,
+    /// Public base URL used by the agent to construct sources-reply URLs in the
+    /// X thread (e.g. `https://douglaz.github.io`). Substituted into the prompt
+    /// as `{{PUBLIC_BASE_URL}}`. Empty string when not configured.
+    pub public_base_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +90,7 @@ impl SubprocessHarness {
             ),
             ("{{LENS_CONTENT}}", ctx.lens.content.as_str()),
             ("{{CANDIDATE_SLUG}}", ctx.candidate_slug.as_str()),
+            ("{{PUBLIC_BASE_URL}}", self.config.public_base_url.as_str()),
         ];
 
         render_template(&self.prompt_template, &substitutions)
@@ -328,6 +334,7 @@ mod tests {
             args: vec![],
             prompt_template: dir.path().join("missing.md"),
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect_err("missing prompt");
 
@@ -345,6 +352,7 @@ mod tests {
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect_err("invalid prompt");
 
@@ -364,6 +372,7 @@ mod tests {
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect_err("invalid prompt");
 
@@ -394,7 +403,7 @@ mod tests {
             r#"#!/bin/sh
 cat >/dev/null
 echo "diagnostic line"
-echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}'
+echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead analytic claim.","Sources: https://example.test/concepts/foo"]}'
 "#,
         )
         .expect("script");
@@ -407,6 +416,7 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect("harness");
 
@@ -448,6 +458,7 @@ sleep 5
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 1,
+            public_base_url: String::new(),
         })
         .expect("harness");
 
@@ -472,7 +483,7 @@ sleep 5
             &script,
             r#"#!/bin/sh
 exec 0<&-
-echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}'
+echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead analytic claim.","Sources: https://example.test/concepts/foo"]}'
 "#,
         )
         .expect("script");
@@ -488,6 +499,7 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect("harness");
 
@@ -526,6 +538,7 @@ exit 7
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect("harness");
 
@@ -575,6 +588,7 @@ exit 7
             args: vec![],
             prompt_template: prompt_path,
             timeout_secs: 5,
+            public_base_url: String::new(),
         })
         .expect("harness");
 

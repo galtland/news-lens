@@ -16,6 +16,9 @@ args = ["./fixtures/harness/stub-harness.sh"]
 prompt_template = "./prompts/process-post.md"
 timeout_secs = 5
 
+[publish]
+public_base_url = "https://example.test"
+
 [watch]
 poll_interval_secs = 300
 accounts = []

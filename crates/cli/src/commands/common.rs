@@ -32,6 +32,7 @@ pub fn build_harness(config: &AppConfig) -> Result<SubprocessHarness> {
         args: config.harness.args.clone(),
         prompt_template: config.harness.prompt_template.clone(),
         timeout_secs: config.harness.timeout_secs,
+        public_base_url: config.publish.public_base_url.clone(),
     })
     .context("Failed to initialize harness")
 }

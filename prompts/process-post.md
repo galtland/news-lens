@@ -15,6 +15,8 @@ Post metadata:
 - created_at: {{POST_CREATED_AT}}
 - candidate_slug: {{CANDIDATE_SLUG}}
 
+Public wiki base URL: {{PUBLIC_BASE_URL}}
+
 Post text:
 {{POST_TEXT}}
 
@@ -46,14 +48,36 @@ Task:
      example: ../concepts/state-power-and-intervention.md). Quote the
      news text verbatim where you call out a framing.
    - Write the thesis to wiki/theses/<slug>.md.
+   - Build the X thread as a JSON array of strings (each item <= 280
+     chars). Structure:
+     - thread[0] (lead): a pure analytic claim from the lens's frame. Do
+       not restate the headline, do not include any URL, and do not use
+       inline [[wikilinks]] (they render as literal brackets on X).
+       Advance a point; do not summarize the news.
+     - thread[1..] (sources): URLs of the form
+       {{PUBLIC_BASE_URL}}/<category>/<slug> for each cited wiki article,
+       with minimal framing text. One citation per message at most.
 4. Run /wiki:lint --fix to heal indexes, See Also backlinks, and log.md.
 5. Print the final line of stdout as a single JSON object:
    { "stance": "...", "raw_path": "...", "raw_slug": "...",
-     "thesis_path": "...?", "thesis_slug": "...?", "one_liner": "...?" }
-   On decline, omit thesis_path, thesis_slug, and one_liner.
+     "thesis_path": "...?", "thesis_slug": "...?", "thread": ["..."]? }
+   Example:
+     {
+       "stance": "endorse",
+       "raw_path": "raw/news/2026-05-12-argentina-rent-decontrol.md",
+       "raw_slug": "2026-05-12-argentina-rent-decontrol",
+       "thesis_path": "wiki/theses/argentina-rent-decontrol-2023.md",
+       "thesis_slug": "argentina-rent-decontrol-2023",
+       "thread": [
+         "Price ceilings manufacture shortages because they suppress the prices that encode landlords' next-best alternatives. Repeal restores the supply held off the market. The corpus has Mises and Rothbard on this directly.",
+         "Sources: {{PUBLIC_BASE_URL}}/concepts/economic-calculation-problem {{PUBLIC_BASE_URL}}/references/man-economy-and-state"
+       ]
+     }
+   On decline, omit thesis_path, thesis_slug, and thread.
 
 Constraints:
 - Never invent positions the wiki does not hold.
 - Never cite slugs that don't exist.
-- Keep one_liner <= 240 chars; include it as the first paragraph of the
-  thesis after the H1.
+- Each thread item is at most 280 characters. No inline [[wikilinks]] in
+  the X thread — those render as literal brackets on X. The thesis lead
+  paragraph (after the H1) is for the wiki and may use wikilinks freely.

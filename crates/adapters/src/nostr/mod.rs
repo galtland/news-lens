@@ -143,10 +143,20 @@ impl NostrPublisher {
         }
     }
 
-    /// Generate a Nostr event (NIP-01)
-    fn create_event(&self, content: &str, created_at: i64) -> Result<NostrEvent> {
+    /// Generate a Nostr event (NIP-01). When `reply_to_event_id` is set, attach
+    /// it as an NIP-10 `e` tag so relays and clients render the new event as a
+    /// reply.
+    fn create_event(
+        &self,
+        content: &str,
+        created_at: i64,
+        reply_to_event_id: Option<&str>,
+    ) -> Result<NostrEvent> {
         let pubkey = self.derive_pubkey()?;
-        let tags: Vec<Vec<String>> = vec![];
+        let mut tags: Vec<Vec<String>> = vec![];
+        if let Some(parent_id) = reply_to_event_id {
+            tags.push(vec!["e".to_string(), parent_id.to_string()]);
+        }
 
         let serialized =
             serde_json::to_string(&(0, &pubkey, created_at, NOSTR_TEXT_NOTE_KIND, &tags, content))
@@ -308,7 +318,7 @@ impl Publisher for NostrPublisher {
 
         let created_at = OffsetDateTime::now_utc().unix_timestamp();
         let event = self
-            .create_event(&post.text, created_at)
+            .create_event(&post.text, created_at, post.in_reply_to_id.as_deref())
             .map_err(|e| PublishError::Api(format!("Failed to create Nostr event: {}", e)))?;
         let event_id = event.id.clone();
 
@@ -366,6 +376,7 @@ mod tests {
             text: "Narrative analysis of @user\n\nTags: test_tag (0.85)\n\nOriginal: https://x.com/user/status/123".to_string(),
             source_post_id: "123".to_string(),
             source_post_url: "https://x.com/user/status/123".to_string(),
+            in_reply_to_id: None,
         }
     }
 
@@ -470,7 +481,7 @@ mod tests {
         let publisher = NostrPublisher::new(sample_secret(), vec![]).expect("valid publisher");
 
         let event = publisher
-            .create_event("Test content", 1_704_000_000)
+            .create_event("Test content", 1_704_000_000, None)
             .expect("event creation should succeed");
 
         assert_eq!(event.id.len(), 64);
@@ -478,6 +489,21 @@ mod tests {
         assert_eq!(event.sig.len(), 128);
         assert_eq!(event.kind, 1);
         assert_eq!(event.content, "Test content");
+        assert!(event.tags.is_empty());
+    }
+
+    #[test]
+    fn test_create_event_attaches_reply_e_tag() {
+        let publisher = NostrPublisher::new(sample_secret(), vec![]).expect("valid publisher");
+
+        let event = publisher
+            .create_event("Reply content", 1_704_000_000, Some("parent_event_id"))
+            .expect("event creation should succeed");
+
+        assert_eq!(
+            event.tags,
+            vec![vec!["e".to_string(), "parent_event_id".to_string()]]
+        );
     }
 
     #[test]
@@ -581,7 +607,7 @@ mod tests {
         let publisher = NostrPublisher::new(sample_secret(), vec![]).expect("valid publisher");
 
         let event = publisher
-            .create_event("hello nostr", 1_700_000_000)
+            .create_event("hello nostr", 1_700_000_000, None)
             .expect("event creation should succeed");
 
         let serialized = serde_json::to_string(&(
@@ -616,7 +642,7 @@ mod tests {
         let content = "Quote: \"hello\"\\nPath: C:\\\\tmp\\\\file\\nUnicode: café";
 
         let event = publisher
-            .create_event(content, 1_700_000_111)
+            .create_event(content, 1_700_000_111, None)
             .expect("event creation should succeed");
 
         let serialized = serde_json::to_string(&(

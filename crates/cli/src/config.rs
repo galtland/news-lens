@@ -23,6 +23,9 @@ pub struct AppConfig {
     pub harness: HarnessConfig,
 
     #[serde(default)]
+    pub publish: PublishConfig,
+
+    #[serde(default)]
     pub watch: WatchConfig,
 
     #[serde(default)]
@@ -72,6 +75,16 @@ pub struct HarnessConfig {
 
     #[serde(default = "default_harness_timeout")]
     pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PublishConfig {
+    /// Base URL prefix for sources-reply links in the X thread (and equivalently
+    /// for the lead Nostr note's source URL). Example: `https://douglaz.github.io`.
+    /// Required only when `[x.write] enabled = true` or `[nostr] enabled = true`;
+    /// otherwise optional.
+    #[serde(default)]
+    pub public_base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +376,11 @@ args = ["--print"]
 prompt_template = "{prompt_template}"
 timeout_secs = 600
 
+[publish]
+# Base URL for sources-reply links in the X thread. Required when
+# [x.write] or [nostr] is enabled.
+public_base_url = "https://douglaz.github.io"
+
 [watch]
 poll_interval_secs = 300
 accounts = []
@@ -403,6 +421,20 @@ relays = ["wss://relay.damus.io"]
         }
         if !(1..=10).contains(&self.x.read.max_pages) {
             anyhow::bail!("x.read.max_pages must be between 1 and 10");
+        }
+        let publish_required = self.x.write.enabled || self.nostr.enabled;
+        let base = self.publish.public_base_url.trim();
+        if !base.is_empty() {
+            if !(base.starts_with("http://") || base.starts_with("https://")) {
+                anyhow::bail!(
+                    "publish.public_base_url must be an http(s) URL, got: {}",
+                    base
+                );
+            }
+        } else if publish_required {
+            anyhow::bail!(
+                "publish.public_base_url is required when [x.write] or [nostr] is enabled"
+            );
         }
         Ok(())
     }

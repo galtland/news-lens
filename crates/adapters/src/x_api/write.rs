@@ -94,9 +94,18 @@ impl Publisher for XPublisher {
             return Err(PublishError::Api("Publisher is disabled".to_string()));
         }
 
-        let text = match self.mode {
-            XPublishMode::NewPost => format_new_post_text(post, self.max_chars),
-            XPublishMode::Reply | XPublishMode::Quote => post.text.clone(),
+        // An explicit `in_reply_to_id` (from a thread chain) overrides the
+        // configured mode — subsequent thread items always reply directly to the
+        // previous item's returned ID. The lead post (no override) follows the
+        // configured mode.
+        let chained_reply = post.in_reply_to_id.clone();
+        let text = if chained_reply.is_some() {
+            post.text.clone()
+        } else {
+            match self.mode {
+                XPublishMode::NewPost => format_new_post_text(post, self.max_chars),
+                XPublishMode::Reply | XPublishMode::Quote => post.text.clone(),
+            }
         };
 
         // Validate content length
@@ -108,24 +117,34 @@ impl Publisher for XPublisher {
             });
         }
 
-        let request = match self.mode {
-            XPublishMode::Reply => CreateTweetRequest {
+        let request = if let Some(in_reply_to_tweet_id) = chained_reply {
+            CreateTweetRequest {
                 text,
                 reply: Some(ReplySettings {
-                    in_reply_to_tweet_id: post.source_post_id.clone(),
+                    in_reply_to_tweet_id,
                 }),
                 quote_tweet_id: None,
-            },
-            XPublishMode::Quote => CreateTweetRequest {
-                text,
-                reply: None,
-                quote_tweet_id: Some(post.source_post_id.clone()),
-            },
-            XPublishMode::NewPost => CreateTweetRequest {
-                text,
-                reply: None,
-                quote_tweet_id: None,
-            },
+            }
+        } else {
+            match self.mode {
+                XPublishMode::Reply => CreateTweetRequest {
+                    text,
+                    reply: Some(ReplySettings {
+                        in_reply_to_tweet_id: post.source_post_id.clone(),
+                    }),
+                    quote_tweet_id: None,
+                },
+                XPublishMode::Quote => CreateTweetRequest {
+                    text,
+                    reply: None,
+                    quote_tweet_id: Some(post.source_post_id.clone()),
+                },
+                XPublishMode::NewPost => CreateTweetRequest {
+                    text,
+                    reply: None,
+                    quote_tweet_id: None,
+                },
+            }
         };
 
         let url = format!("{}/2/tweets", self.base_url);
@@ -243,6 +262,7 @@ mod tests {
             text: "Tags: test_tag (0.85)\nTest rationale".to_string(),
             source_post_id: "original_tweet_id".to_string(),
             source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+            in_reply_to_id: None,
         }
     }
 
@@ -348,6 +368,7 @@ mod tests {
             text: "alpha beta gamma delta epsilon zeta eta theta".to_string(),
             source_post_id: "original_tweet_id".to_string(),
             source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+            in_reply_to_id: None,
         };
 
         let text = format_new_post_text(&post, 64);
@@ -364,6 +385,7 @@ mod tests {
             text: "é ".repeat(80),
             source_post_id: "original_tweet_id".to_string(),
             source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+            in_reply_to_id: None,
         };
 
         let text = format_new_post_text(&post, 64);
@@ -419,11 +441,50 @@ mod tests {
             text: "ééééé".to_string(),
             source_post_id: "original_tweet_id".to_string(),
             source_post_url: "https://x.com/user/status/original_tweet_id".to_string(),
+            in_reply_to_id: None,
         };
 
         let result = publisher.publish(&post).await.unwrap();
 
         assert_eq!(result.id.as_deref(), Some("new_tweet_id"));
+    }
+
+    #[tokio::test]
+    async fn test_publish_in_reply_to_id_overrides_mode() {
+        let mock_server = MockServer::start().await;
+
+        // Even though mode is NewPost (which normally appends the source URL and
+        // does not set `reply`), an explicit in_reply_to_id forces a direct reply
+        // to that ID and uses the raw text untouched.
+        Mock::given(method("POST"))
+            .and(path("/2/tweets"))
+            .and(body_json(serde_json::json!({
+                "text": "Tags: test_tag (0.85)\nTest rationale",
+                "reply": {
+                    "in_reply_to_tweet_id": "previous_thread_item_id"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "next_tweet_id"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let publisher = XPublisher::with_base_url(
+            SecretString::new("test-token".into()),
+            mock_server.uri(),
+            XPublishMode::NewPost,
+            280,
+            true,
+        );
+
+        let mut post = sample_post();
+        post.in_reply_to_id = Some("previous_thread_item_id".to_string());
+
+        let result = publisher.publish(&post).await.unwrap();
+        assert_eq!(result.id.as_deref(), Some("next_tweet_id"));
     }
 
     #[tokio::test]

@@ -101,20 +101,29 @@ struct OutboxEntry<'a> {
     source_post_id: &'a str,
     source_post_url: &'a str,
     text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_reply_to_id: Option<&'a str>,
 }
 
 #[async_trait]
 impl Publisher for OutboxPublisher {
     async fn publish(&self, post: &RenderedPost) -> Result<PublishResult, PublishError> {
-        let text = match self.text_mode {
-            OutboxTextMode::Plain => post.text.clone(),
-            OutboxTextMode::XNewPost { max_chars } => format_new_post_text(post, max_chars),
+        let text = if post.in_reply_to_id.is_some() {
+            // Chained thread items always emit raw text; the source URL belongs
+            // on the lead, not on every reply. Mirrors `XPublisher::publish`.
+            post.text.clone()
+        } else {
+            match self.text_mode {
+                OutboxTextMode::Plain => post.text.clone(),
+                OutboxTextMode::XNewPost { max_chars } => format_new_post_text(post, max_chars),
+            }
         };
         let entry = OutboxEntry {
             platform: self.platform,
             source_post_id: &post.source_post_id,
             source_post_url: &post.source_post_url,
             text: &text,
+            in_reply_to_id: post.in_reply_to_id.as_deref(),
         };
 
         self.writer
@@ -122,6 +131,11 @@ impl Publisher for OutboxPublisher {
             .await
             .map_err(|error| PublishError::Api(format!("Outbox write failed: {}", error)))?;
 
+        // The outbox does not assign a platform ID — manual approval mode means
+        // the operator publishes each entry and captures its real ID later.
+        // Subsequent thread items written to the outbox carry `in_reply_to_id =
+        // None`; thread order is preserved via the entries' file ordering, not
+        // via cross-entry IDs.
         Ok(PublishResult {
             id: None,
             url: None,
@@ -155,6 +169,7 @@ mod tests {
             text: "Rendered content".to_string(),
             source_post_id: "123".to_string(),
             source_post_url: "https://x.com/example/status/123".to_string(),
+            in_reply_to_id: None,
         };
 
         let result = publisher.publish(&post).await.expect("publish");
@@ -182,6 +197,7 @@ mod tests {
             text: "Rendered content".to_string(),
             source_post_id: "123".to_string(),
             source_post_url: "https://x.com/example/status/123".to_string(),
+            in_reply_to_id: None,
         };
 
         publisher.publish(&post).await.expect("publish");
