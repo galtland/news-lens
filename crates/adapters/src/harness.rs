@@ -654,7 +654,7 @@ exit 7
     fn parse_raw_agent_return_uses_final_json_line() {
         let stdout = r#"
 diagnostic line
-{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead item.","Sources item."]}
 "#;
 
         let raw = parse_raw_agent_return(stdout).expect("raw JSON");
@@ -666,7 +666,7 @@ diagnostic line
     #[test]
     fn parse_raw_agent_return_skips_non_contract_json_after_contract_json() {
         let stdout = r#"
-{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","one_liner":"One line."}
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead item.","Sources item."]}
 {"trace_id":"abc"}
 "#;
 

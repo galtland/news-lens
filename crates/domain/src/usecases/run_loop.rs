@@ -297,6 +297,8 @@ where
                     {
                         Ok(lead_id) => x_post_id = lead_id,
                         Err(error) => {
+                            let ThreadPublishError { lead_id, error } = error;
+                            x_post_id = lead_id;
                             tracing::error!(error = %error, "Failed to publish X thread");
                             publish_errors.push(format!("X publish failed: {}", error));
                         }
@@ -310,6 +312,8 @@ where
                     {
                         Ok(lead_id) => nostr_event_id = lead_id,
                         Err(error) => {
+                            let ThreadPublishError { lead_id, error } = error;
+                            nostr_event_id = lead_id;
                             tracing::error!(error = %error, "Failed to publish Nostr thread");
                             publish_errors.push(format!("Nostr publish failed: {}", error));
                         }
@@ -368,7 +372,7 @@ where
         &self,
         publisher: &P,
         thread: Vec<RenderedPost>,
-    ) -> Result<Option<String>, crate::ports::PublishError>
+    ) -> Result<Option<String>, ThreadPublishError>
     where
         P: Publisher + ?Sized,
     {
@@ -386,7 +390,13 @@ where
                 // (the source post ID) stays. Publishers that don't return IDs
                 // (e.g. the outbox) use it only as "this is a continuation" signal.
             }
-            let result = publisher.publish(&item).await?;
+            let result = publisher
+                .publish(&item)
+                .await
+                .map_err(|error| ThreadPublishError {
+                    lead_id: lead_id.clone(),
+                    error,
+                })?;
             if index == 0 {
                 lead_id = result.id.clone();
             }
@@ -455,6 +465,11 @@ pub enum RunLoopError {
     State(String),
     #[error("Harness configuration error: {0}")]
     HarnessConfig(String),
+}
+
+struct ThreadPublishError {
+    lead_id: Option<String>,
+    error: crate::ports::PublishError,
 }
 
 fn state_error(error: StateError) -> RunLoopError {

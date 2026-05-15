@@ -60,7 +60,6 @@ fn process_post_with_stub_harness_outputs_valid_json() {
     assert_eq!(value["stance"], "critique");
     assert_eq!(value["raw_path"], "raw/news/test-news-item.md");
     assert_eq!(value["thesis_slug"], "test-thesis");
-    assert!(value.get("one_liner").is_none());
     let thread = value["thread"].as_array().expect("thread array");
     assert_eq!(thread.len(), 2);
     assert_eq!(thread[0], "A concise fixture lead grounded in the wiki.");
@@ -192,10 +191,16 @@ fn process_jsonl_require_approval_writes_outbox_and_state() {
         entries[0]["text"],
         "A concise fixture lead grounded in the wiki."
     );
+    assert!(entries[0].get("in_reply_to_id").is_none());
     assert_eq!(
         entries[1]["text"],
         "Sources: https://example.test/concepts/foo"
     );
+    assert_eq!(
+        entries[1]["in_reply_to_id"].as_str(),
+        entries[0]["outbox_id"].as_str()
+    );
+    assert_ne!(entries[1]["in_reply_to_id"].as_str(), Some("fixture-1"));
 }
 
 #[test]

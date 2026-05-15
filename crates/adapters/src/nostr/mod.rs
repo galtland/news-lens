@@ -144,8 +144,8 @@ impl NostrPublisher {
     }
 
     /// Generate a Nostr event (NIP-01). When `reply_to_event_id` is set, attach
-    /// it as an NIP-10 `e` tag so relays and clients render the new event as a
-    /// reply.
+    /// a simple parent `e` tag; root/reply markers and relay hints are out of
+    /// scope for the rev5 KISS threading contract.
     fn create_event(
         &self,
         content: &str,

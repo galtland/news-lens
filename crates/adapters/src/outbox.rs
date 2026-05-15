@@ -5,8 +5,10 @@ use async_trait::async_trait;
 use news_lens_domain::model::{RenderedPost, XPublishMode};
 use news_lens_domain::ports::{PublishError, PublishResult, Publisher};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -64,6 +66,8 @@ pub struct OutboxPublisher {
     writer: OutboxWriter,
     platform: &'static str,
     text_mode: OutboxTextMode,
+    next_id: Arc<AtomicU64>,
+    thread_parent_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl OutboxPublisher {
@@ -72,6 +76,8 @@ impl OutboxPublisher {
             writer,
             platform,
             text_mode: OutboxTextMode::Plain,
+            next_id: Arc::new(AtomicU64::new(1)),
+            thread_parent_ids: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -85,6 +91,8 @@ impl OutboxPublisher {
             writer,
             platform: "x",
             text_mode,
+            next_id: Arc::new(AtomicU64::new(1)),
+            thread_parent_ids: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -97,6 +105,7 @@ enum OutboxTextMode {
 
 #[derive(Serialize)]
 struct OutboxEntry<'a> {
+    outbox_id: &'a str,
     platform: &'a str,
     source_post_id: &'a str,
     source_post_url: &'a str,
@@ -108,6 +117,22 @@ struct OutboxEntry<'a> {
 #[async_trait]
 impl Publisher for OutboxPublisher {
     async fn publish(&self, post: &RenderedPost) -> Result<PublishResult, PublishError> {
+        let outbox_id = format!(
+            "outbox:{}:{}",
+            self.platform,
+            self.next_id.fetch_add(1, Ordering::Relaxed)
+        );
+        let input_parent_id = post.in_reply_to_id.as_deref();
+        let in_reply_to_id = if input_parent_id == Some(post.source_post_id.as_str()) {
+            self.thread_parent_ids
+                .lock()
+                .await
+                .get(&post.source_post_id)
+                .cloned()
+                .or_else(|| input_parent_id.map(str::to_string))
+        } else {
+            input_parent_id.map(str::to_string)
+        };
         let text = if post.in_reply_to_id.is_some() {
             // Chained thread items always emit raw text; the source URL belongs
             // on the lead, not on every reply. Mirrors `XPublisher::publish`.
@@ -119,11 +144,12 @@ impl Publisher for OutboxPublisher {
             }
         };
         let entry = OutboxEntry {
+            outbox_id: &outbox_id,
             platform: self.platform,
             source_post_id: &post.source_post_id,
             source_post_url: &post.source_post_url,
             text: &text,
-            in_reply_to_id: post.in_reply_to_id.as_deref(),
+            in_reply_to_id: in_reply_to_id.as_deref(),
         };
 
         self.writer
@@ -131,11 +157,11 @@ impl Publisher for OutboxPublisher {
             .await
             .map_err(|error| PublishError::Api(format!("Outbox write failed: {}", error)))?;
 
-        // The outbox does not assign a platform ID — manual approval mode means
-        // the operator publishes each entry and captures its real ID later.
-        // Subsequent thread items written to the outbox carry `in_reply_to_id =
-        // None`; thread order is preserved via the entries' file ordering, not
-        // via cross-entry IDs.
+        self.thread_parent_ids
+            .lock()
+            .await
+            .insert(post.source_post_id.clone(), outbox_id);
+
         Ok(PublishResult {
             id: None,
             url: None,
@@ -180,9 +206,11 @@ mod tests {
         let value: Value = serde_json::from_str(line).expect("valid json");
 
         assert_eq!(value["platform"], "x");
+        assert_eq!(value["outbox_id"], "outbox:x:1");
         assert_eq!(value["source_post_id"], "123");
         assert_eq!(value["source_post_url"], "https://x.com/example/status/123");
         assert_eq!(value["text"], "Rendered content");
+        assert!(value.get("in_reply_to_id").is_none());
     }
 
     #[tokio::test]

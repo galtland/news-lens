@@ -82,7 +82,8 @@ pub struct PublishConfig {
     /// Base URL prefix for sources-reply links in the X thread (and equivalently
     /// for the lead Nostr note's source URL). Example: `https://douglaz.github.io`.
     /// Required only when `[x.write] enabled = true` or `[nostr] enabled = true`;
-    /// otherwise optional.
+    /// otherwise optional. Do not include a trailing slash; prompt URLs append
+    /// `/<category>/<slug>`.
     #[serde(default)]
     pub public_base_url: String,
 }
@@ -431,6 +432,12 @@ relays = ["wss://relay.damus.io"]
                     base
                 );
             }
+            if base.ends_with('/') {
+                anyhow::bail!(
+                    "publish.public_base_url must not end with a slash, got: {}",
+                    base
+                );
+            }
         } else if publish_required {
             anyhow::bail!(
                 "publish.public_base_url is required when [x.write] or [nostr] is enabled"
@@ -486,6 +493,21 @@ mod tests {
         let error = AppConfig::load(Some(&path)).expect_err("invalid config");
 
         assert!(error.to_string().contains("x.read.max_pages"));
+    }
+
+    #[test]
+    fn load_rejects_public_base_url_with_trailing_slash() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[publish]\npublic_base_url = \"https://example.test/\"\n",
+        )
+        .expect("write config");
+
+        let error = AppConfig::load(Some(&path)).expect_err("invalid config");
+
+        assert!(error.to_string().contains("must not end with a slash"));
     }
 
     #[test]
