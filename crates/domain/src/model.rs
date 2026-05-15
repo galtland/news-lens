@@ -91,6 +91,9 @@ impl std::str::FromStr for Stance {
     }
 }
 
+/// Per-thread-item character limit (X's per-post limit).
+pub const THREAD_ITEM_MAX_CHARS: usize = 280;
+
 /// Raw JSON shape printed by the agent before contract validation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RawAgentReturn {
@@ -99,7 +102,7 @@ pub struct RawAgentReturn {
     pub raw_slug: Option<String>,
     pub thesis_path: Option<String>,
     pub thesis_slug: Option<String>,
-    pub one_liner: Option<String>,
+    pub thread: Option<Vec<String>>,
 }
 
 /// Validated JSON return from the agent.
@@ -114,7 +117,7 @@ pub struct AgentReturn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thesis_slug: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub one_liner: Option<String>,
+    pub thread: Option<Vec<String>>,
 }
 
 impl RawAgentReturn {
@@ -130,7 +133,7 @@ impl RawAgentReturn {
             .ok_or(AgentValidationError::MissingField("raw_path"))?;
         let raw_path = normalize_existing_wiki_file(wiki_root, "raw_path", &raw_path)?;
 
-        let mut one_liner = self.one_liner.map(|value| normalize_one_liner(&value, 240));
+        let validated_thread = self.thread.map(validate_thread_items).transpose()?;
 
         if matches!(
             stance,
@@ -148,11 +151,9 @@ impl RawAgentReturn {
             if thesis_slug.is_empty() {
                 return Err(AgentValidationError::BlankThesisSlug);
             }
-            let required_one_liner = one_liner
-                .take()
-                .ok_or(AgentValidationError::MissingField("one_liner"))?;
-            if required_one_liner.is_empty() {
-                return Err(AgentValidationError::BlankOneLiner);
+            let thread = validated_thread.ok_or(AgentValidationError::MissingField("thread"))?;
+            if thread.is_empty() {
+                return Err(AgentValidationError::EmptyThread);
             }
 
             return Ok(AgentReturn {
@@ -161,7 +162,7 @@ impl RawAgentReturn {
                 raw_slug: self.raw_slug,
                 thesis_path: Some(thesis_path),
                 thesis_slug: Some(thesis_slug),
-                one_liner: Some(required_one_liner),
+                thread: Some(thread),
             });
         }
 
@@ -175,15 +176,38 @@ impl RawAgentReturn {
             .map(|slug| slug.trim().to_string())
             .filter(|slug| !slug.is_empty());
 
+        // For decline/failed, an empty array is dropped to None for cleanliness.
+        let thread = validated_thread.filter(|items| !items.is_empty());
+
         Ok(AgentReturn {
             stance,
             raw_path,
             raw_slug: self.raw_slug,
             thesis_path,
             thesis_slug,
-            one_liner,
+            thread,
         })
     }
+}
+
+fn validate_thread_items(items: Vec<String>) -> Result<Vec<String>, AgentValidationError> {
+    let mut validated = Vec::with_capacity(items.len());
+    for (index, item) in items.into_iter().enumerate() {
+        let trimmed = item.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(AgentValidationError::BlankThreadItem { index });
+        }
+        let len = trimmed.chars().count();
+        if len > THREAD_ITEM_MAX_CHARS {
+            return Err(AgentValidationError::ThreadItemTooLong {
+                index,
+                len,
+                max: THREAD_ITEM_MAX_CHARS,
+            });
+        }
+        validated.push(trimmed);
+    }
+    Ok(validated)
 }
 
 /// Validation errors for the agent return contract.
@@ -201,10 +225,18 @@ pub enum AgentValidationError {
     MissingWikiRoot { path: String },
     #[error("{field} does not exist: {path}")]
     MissingFile { field: &'static str, path: String },
-    #[error("one_liner is blank")]
-    BlankOneLiner,
     #[error("thesis_slug is blank")]
     BlankThesisSlug,
+    #[error("thread is empty")]
+    EmptyThread,
+    #[error("thread[{index}] is blank")]
+    BlankThreadItem { index: usize },
+    #[error("thread[{index}] is {len} chars, exceeds limit of {max}")]
+    ThreadItemTooLong {
+        index: usize,
+        len: usize,
+        max: usize,
+    },
 }
 
 /// Publishing mode for X posts.
@@ -226,6 +258,9 @@ pub struct RenderedPost {
     pub text: String,
     pub source_post_id: String,
     pub source_post_url: String,
+    /// When `Some`, this post must be published as a direct reply to the given
+    /// platform-specific post ID. Set by the run loop while chaining thread items.
+    pub in_reply_to_id: Option<String>,
 }
 
 /// Account watch state.
@@ -329,22 +364,6 @@ pub(crate) fn normalize_existing_wiki_file(
     Ok(relative.to_string_lossy().into_owned())
 }
 
-fn normalize_one_liner(value: &str, max_len: usize) -> String {
-    let value = value.trim();
-    if value.chars().count() <= max_len {
-        return value.to_string();
-    }
-
-    let reserve = 3;
-    let limit = max_len.saturating_sub(reserve);
-    let prefix = value.chars().take(limit).collect::<String>();
-    let candidate = prefix
-        .rfind(char::is_whitespace)
-        .filter(|idx| *idx > 0)
-        .unwrap_or(prefix.len());
-    format!("{}...", prefix[..candidate].trim_end())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,7 +384,10 @@ mod tests {
             raw_slug: Some("item".to_string()),
             thesis_path: Some("wiki/theses/item.md".to_string()),
             thesis_slug: Some("item".to_string()),
-            one_liner: Some("A concise line.".to_string()),
+            thread: Some(vec![
+                "A concise analytic claim.".to_string(),
+                "Sources: https://example.test/concepts/foo".to_string(),
+            ]),
         }
     }
 
@@ -419,45 +441,116 @@ mod tests {
         raw.stance = Some("failed".to_string());
         raw.thesis_path = None;
         raw.thesis_slug = None;
-        raw.one_liner = None;
+        raw.thread = None;
 
         let output = raw.validate(wiki.path()).expect("failed stance");
         assert_eq!(output.stance, Stance::Failed);
         assert!(output.thesis_path.is_none());
         assert!(output.thesis_slug.is_none());
-        assert!(output.one_liner.is_none());
+        assert!(output.thread.is_none());
     }
 
     #[test]
-    fn validation_truncates_long_one_liner() {
+    fn validation_rejects_missing_thread_on_non_decline_stance() {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
-        raw.one_liner = Some("word ".repeat(80));
+        raw.thread = None;
 
-        let output = raw.validate(wiki.path()).expect("valid with truncation");
-        assert!(output.one_liner.expect("one_liner").chars().count() <= 240);
+        let error = raw.validate(wiki.path()).expect_err("missing thread");
+        assert_eq!(error, AgentValidationError::MissingField("thread"));
     }
 
     #[test]
-    fn validation_truncates_multibyte_one_liner_by_character_count() {
+    fn validation_rejects_empty_thread_on_non_decline_stance() {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
-        raw.one_liner = Some("é".repeat(260));
+        raw.thread = Some(vec![]);
 
-        let output = raw.validate(wiki.path()).expect("valid with truncation");
-        let one_liner = output.one_liner.expect("one_liner");
-        assert!(one_liner.chars().count() <= 240);
-        assert!(one_liner.ends_with("..."));
+        let error = raw.validate(wiki.path()).expect_err("empty thread");
+        assert_eq!(error, AgentValidationError::EmptyThread);
     }
 
     #[test]
-    fn validation_rejects_blank_one_liner_on_non_decline_stance() {
+    fn validation_rejects_blank_thread_item() {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
-        raw.one_liner = Some(" \n\t ".to_string());
+        raw.thread = Some(vec![
+            "lead post".to_string(),
+            "   \n\t ".to_string(),
+            "sources".to_string(),
+        ]);
 
-        let error = raw.validate(wiki.path()).expect_err("blank one_liner");
-        assert_eq!(error, AgentValidationError::BlankOneLiner);
+        let error = raw.validate(wiki.path()).expect_err("blank thread item");
+        assert_eq!(error, AgentValidationError::BlankThreadItem { index: 1 });
+    }
+
+    #[test]
+    fn validation_rejects_thread_item_over_280_chars() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        // 281 ASCII chars -> 281 char count, just over the limit.
+        let too_long = "a".repeat(281);
+        raw.thread = Some(vec!["lead".to_string(), too_long]);
+
+        let error = raw
+            .validate(wiki.path())
+            .expect_err("over-long thread item");
+        assert_eq!(
+            error,
+            AgentValidationError::ThreadItemTooLong {
+                index: 1,
+                len: 281,
+                max: THREAD_ITEM_MAX_CHARS,
+            }
+        );
+    }
+
+    #[test]
+    fn validation_measures_thread_item_length_by_character_count() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        // 281 'é' chars: each is 2 bytes in UTF-8 (562 bytes) but the char count
+        // is what counts against X's per-post limit.
+        let multibyte = "é".repeat(281);
+        raw.thread = Some(vec!["lead".to_string(), multibyte]);
+
+        let error = raw
+            .validate(wiki.path())
+            .expect_err("over-long multibyte thread item");
+        assert_eq!(
+            error,
+            AgentValidationError::ThreadItemTooLong {
+                index: 1,
+                len: 281,
+                max: THREAD_ITEM_MAX_CHARS,
+            }
+        );
+    }
+
+    #[test]
+    fn validation_accepts_thread_item_at_exact_limit() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.thread = Some(vec!["a".repeat(THREAD_ITEM_MAX_CHARS)]);
+
+        let output = raw.validate(wiki.path()).expect("at-limit thread item");
+        let thread = output.thread.expect("thread present");
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].chars().count(), THREAD_ITEM_MAX_CHARS);
+    }
+
+    #[test]
+    fn validation_trims_thread_items_before_recording() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.thread = Some(vec![
+            "  lead post  \n".to_string(),
+            "\tsources \n".to_string(),
+        ]);
+
+        let output = raw.validate(wiki.path()).expect("trims thread");
+        let thread = output.thread.expect("thread present");
+        assert_eq!(thread, vec!["lead post".to_string(), "sources".to_string()]);
     }
 
     #[test]
@@ -487,7 +580,7 @@ mod tests {
         raw.stance = Some("decline".to_string());
         raw.thesis_path = None;
         raw.thesis_slug = Some(" \n\t ".to_string());
-        raw.one_liner = None;
+        raw.thread = None;
 
         let output = raw.validate(wiki.path()).expect("valid decline");
         assert!(output.thesis_slug.is_none());
@@ -500,20 +593,39 @@ mod tests {
         raw.stance = Some("failed".to_string());
         raw.thesis_path = Some("wiki/theses/item.md".to_string());
         raw.thesis_slug = Some(" item \n".to_string());
-        raw.one_liner = None;
+        raw.thread = None;
 
         let output = raw.validate(wiki.path()).expect("valid failed");
         assert_eq!(output.thesis_slug.as_deref(), Some("item"));
     }
 
     #[test]
-    fn validation_trims_one_liner_before_publishing() {
+    fn validation_validates_thread_items_on_decline_when_present() {
         let wiki = wiki_with_files();
         let mut raw = valid_raw();
-        raw.one_liner = Some("  A concise line. \n".to_string());
+        raw.stance = Some("decline".to_string());
+        raw.thesis_path = None;
+        raw.thesis_slug = None;
+        raw.thread = Some(vec!["a".repeat(281)]);
 
-        let output = raw.validate(wiki.path()).expect("valid one_liner");
-        assert_eq!(output.one_liner.as_deref(), Some("A concise line."));
+        let error = raw.validate(wiki.path()).expect_err("decline rejects long");
+        assert!(matches!(
+            error,
+            AgentValidationError::ThreadItemTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_drops_empty_optional_thread_on_decline_stance() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.stance = Some("decline".to_string());
+        raw.thesis_path = None;
+        raw.thesis_slug = None;
+        raw.thread = Some(vec![]);
+
+        let output = raw.validate(wiki.path()).expect("valid decline");
+        assert!(output.thread.is_none());
     }
 
     #[test]

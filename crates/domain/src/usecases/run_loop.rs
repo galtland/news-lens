@@ -264,10 +264,21 @@ where
 
         if agent_return.stance != Stance::Decline {
             if self.config.dry_run && publishers_enabled {
+                let thread_len = agent_return
+                    .thread
+                    .as_ref()
+                    .map(Vec::len)
+                    .unwrap_or_default();
+                let lead_preview = agent_return
+                    .thread
+                    .as_ref()
+                    .and_then(|items| items.first())
+                    .map(String::as_str);
                 tracing::info!(
                     post_id = %post.id,
-                    one_liner = ?agent_return.one_liner,
-                    "[DRY RUN] Would publish commentary"
+                    thread_items = thread_len,
+                    lead = ?lead_preview,
+                    "[DRY RUN] Would publish commentary thread"
                 );
             } else if should_publish {
                 // Record before publishing so a successful outbox/publish action is not retried
@@ -276,24 +287,30 @@ where
                     .await
                     .map_err(state_error)?;
 
-                let rendered = render_reply(post, &agent_return);
+                let x_rendered = render_thread(post, &agent_return);
+                let nostr_rendered = render_nostr_thread(post, &agent_return);
 
                 if self.x_publisher.is_enabled() {
-                    match self.x_publisher.publish(&rendered).await {
-                        Ok(result) => x_post_id = result.id,
+                    match self
+                        .publish_thread(self.x_publisher.as_ref(), x_rendered)
+                        .await
+                    {
+                        Ok(lead_id) => x_post_id = lead_id,
                         Err(error) => {
-                            tracing::error!(error = %error, "Failed to publish to X");
+                            tracing::error!(error = %error, "Failed to publish X thread");
                             publish_errors.push(format!("X publish failed: {}", error));
                         }
                     }
                 }
 
                 if self.nostr_publisher.is_enabled() {
-                    let rendered = render_nostr_note(post, &agent_return);
-                    match self.nostr_publisher.publish(&rendered).await {
-                        Ok(result) => nostr_event_id = result.id,
+                    match self
+                        .publish_thread(self.nostr_publisher.as_ref(), nostr_rendered)
+                        .await
+                    {
+                        Ok(lead_id) => nostr_event_id = lead_id,
                         Err(error) => {
-                            tracing::error!(error = %error, "Failed to publish to Nostr");
+                            tracing::error!(error = %error, "Failed to publish Nostr thread");
                             publish_errors.push(format!("Nostr publish failed: {}", error));
                         }
                     }
@@ -340,6 +357,43 @@ where
             x_post_id,
             nostr_event_id,
         })
+    }
+
+    /// Publish a rendered thread sequentially. The first item is posted with whatever
+    /// `in_reply_to_id` was set by the renderer (usually `None`); each subsequent item
+    /// is set to reply directly to the previous item's returned platform ID, when one
+    /// is available. Returns the lead post's ID, if any. On the first publish error
+    /// the chain aborts; downstream items are dropped (no retry, per spec §0 #14).
+    async fn publish_thread<P>(
+        &self,
+        publisher: &P,
+        thread: Vec<RenderedPost>,
+    ) -> Result<Option<String>, crate::ports::PublishError>
+    where
+        P: Publisher + ?Sized,
+    {
+        let mut lead_id: Option<String> = None;
+        let mut previous_id: Option<String> = None;
+
+        for (index, mut item) in thread.into_iter().enumerate() {
+            if index > 0 {
+                if let Some(prev) = previous_id.as_ref() {
+                    // Override the renderer's sentinel with the real previous
+                    // item's platform ID so the chain links in the publisher.
+                    item.in_reply_to_id = Some(prev.clone());
+                }
+                // If no previous ID is available, the renderer-supplied sentinel
+                // (the source post ID) stays. Publishers that don't return IDs
+                // (e.g. the outbox) use it only as "this is a continuation" signal.
+            }
+            let result = publisher.publish(&item).await?;
+            if index == 0 {
+                lead_id = result.id.clone();
+            }
+            previous_id = result.id;
+        }
+
+        Ok(lead_id)
     }
 
     async fn record_failed(
@@ -424,27 +478,44 @@ fn compile_ignore_patterns(patterns: &[String]) -> Vec<Regex> {
         .collect()
 }
 
-fn render_reply(post: &SourcePost, agent_return: &AgentReturn) -> RenderedPost {
-    RenderedPost {
-        text: agent_return.one_liner.clone().unwrap_or_default(),
-        source_post_id: post.id.clone(),
-        source_post_url: post.url.clone(),
-    }
+fn render_thread(post: &SourcePost, agent_return: &AgentReturn) -> Vec<RenderedPost> {
+    let Some(items) = agent_return.thread.as_ref() else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, text)| RenderedPost {
+            text: text.clone(),
+            source_post_id: post.id.clone(),
+            source_post_url: post.url.clone(),
+            // Lead post (index 0): `None` so the publisher honors its configured
+            // mode. Continuation items (index >= 1): pre-seed with the source
+            // post ID as a "this is a chain reply" marker. `publish_thread`
+            // overwrites this with the previous item's real returned ID once
+            // available; if a publisher cannot return platform IDs (e.g. the
+            // outbox), the marker stays so the publisher still skips lead-only
+            // formatting (such as appending the source URL in new_post mode).
+            in_reply_to_id: (index > 0).then(|| post.id.clone()),
+        })
+        .collect()
 }
 
-fn render_nostr_note(post: &SourcePost, agent_return: &AgentReturn) -> RenderedPost {
-    let mut rendered = render_reply(post, agent_return);
-    let source_url = rendered.source_post_url.trim();
-
+fn render_nostr_thread(post: &SourcePost, agent_return: &AgentReturn) -> Vec<RenderedPost> {
+    let mut rendered = render_thread(post, agent_return);
+    let source_url = post.url.trim();
     if source_url.is_empty() {
         return rendered;
     }
 
-    rendered.text = if rendered.text.trim().is_empty() {
-        source_url.to_string()
-    } else {
-        format!("{}\n\n{}", rendered.text.trim_end(), source_url)
-    };
+    if let Some(lead) = rendered.first_mut() {
+        lead.text = if lead.text.trim().is_empty() {
+            source_url.to_string()
+        } else {
+            format!("{}\n\n{}", lead.text.trim_end(), source_url)
+        };
+    }
     rendered
 }
 
@@ -570,7 +641,7 @@ mod tests {
                     raw_slug: Some("partial".to_string()),
                     thesis_path: None,
                     thesis_slug: Some("partial-thesis".to_string()),
-                    one_liner: Some("Partial line".to_string()),
+                    thread: Some(vec!["Partial lead.".to_string()]),
                 }),
             })
         }
@@ -592,7 +663,7 @@ mod tests {
                     raw_slug: Some("partial".to_string()),
                     thesis_path: None,
                     thesis_slug: Some("partial-thesis".to_string()),
-                    one_liner: None,
+                    thread: None,
                 })),
             })
         }
@@ -783,7 +854,10 @@ mod tests {
             raw_slug: Some("item".to_string()),
             thesis_path: Some("theses/item.md".to_string()),
             thesis_slug: Some("item".to_string()),
-            one_liner: Some("One line.".to_string()),
+            thread: Some(vec![
+                "Lead analytic claim.".to_string(),
+                "Sources: https://example.test/concepts/foo".to_string(),
+            ]),
         }
     }
 
@@ -803,7 +877,7 @@ mod tests {
             raw_slug: Some("item".to_string()),
             thesis_path: None,
             thesis_slug: None,
-            one_liner: None,
+            thread: None,
         }
     }
 
@@ -1201,7 +1275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_nostr_publish_includes_source_url_in_note_text() {
+    async fn direct_nostr_publish_appends_source_url_to_lead_thread_item() {
         let state = Arc::new(FakeStateStore::new());
         let x = Arc::new(FakePublisher {
             enabled: false,
@@ -1238,8 +1312,19 @@ mod tests {
 
         assert!(matches!(results[0].1, ProcessResult::Processed { .. }));
         let published = nostr.published.lock().unwrap();
-        assert_eq!(published.len(), 1);
-        assert_eq!(published[0].text, "One line.\n\nhttps://example.com/post");
+        assert_eq!(published.len(), 2);
+        assert_eq!(
+            published[0].text,
+            "Lead analytic claim.\n\nhttps://example.com/post"
+        );
+        // Subsequent thread items are not decorated with the source URL.
+        assert_eq!(
+            published[1].text,
+            "Sources: https://example.test/concepts/foo"
+        );
+        // Chain links the second item back to the first by its returned ID.
+        assert_eq!(published[0].in_reply_to_id, None);
+        assert_eq!(published[1].in_reply_to_id.as_deref(), Some("published-id"));
     }
 
     #[tokio::test]
@@ -1453,7 +1538,8 @@ mod tests {
         assert!(
             matches!(error, RunLoopError::State(message) if message.contains("record_processed"))
         );
-        assert_eq!(x.published.lock().unwrap().len(), 1);
+        // Whole thread is published before the final state write is attempted.
+        assert_eq!(x.published.lock().unwrap().len(), 2);
     }
 
     #[test]
