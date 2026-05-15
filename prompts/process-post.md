@@ -58,21 +58,13 @@ Task:
        {{PUBLIC_BASE_URL}}/<category>/<slug> for each cited wiki article,
        with minimal framing text. One citation per message at most.
 4. Run /wiki:lint --fix to heal indexes, See Also backlinks, and log.md.
-5. Print the final line of stdout as a single JSON object:
-   { "stance": "...", "raw_path": "...", "raw_slug": "...",
-     "thesis_path": "...?", "thesis_slug": "...?", "thread": ["..."]? }
-   Example:
-     {
-       "stance": "endorse",
-       "raw_path": "raw/news/2026-05-12-argentina-rent-decontrol.md",
-       "raw_slug": "2026-05-12-argentina-rent-decontrol",
-       "thesis_path": "wiki/theses/argentina-rent-decontrol-2023.md",
-       "thesis_slug": "argentina-rent-decontrol-2023",
-       "thread": [
-         "Price ceilings manufacture shortages because they suppress the prices that encode landlords' next-best alternatives. Repeal restores the supply held off the market. The corpus has Mises and Rothbard on this directly.",
-         "Sources: {{PUBLIC_BASE_URL}}/concepts/economic-calculation-problem {{PUBLIC_BASE_URL}}/references/man-economy-and-state"
-       ]
-     }
+5. Print the final line of stdout as a single JSON object on ONE line
+   (no pretty-printing, no line breaks inside the object). The harness
+   parses each stdout line independently and rejects multi-line JSON.
+   Shape:
+   { "stance": "...", "raw_path": "...", "raw_slug": "...", "thesis_path": "...?", "thesis_slug": "...?", "thread": ["..."]? }
+   Example (one line):
+   {"stance":"endorse","raw_path":"raw/news/2026-05-12-argentina-rent-decontrol.md","raw_slug":"2026-05-12-argentina-rent-decontrol","thesis_path":"wiki/theses/argentina-rent-decontrol-2023.md","thesis_slug":"argentina-rent-decontrol-2023","thread":["Price ceilings manufacture shortages because they suppress the prices that encode landlords' next-best alternatives. Repeal restores the supply held off the market.","Sources: {{PUBLIC_BASE_URL}}/concepts/economic-calculation-problem {{PUBLIC_BASE_URL}}/references/man-economy-and-state"]}
    On decline, omit thesis_path, thesis_slug, and thread.
 
 Constraints:

@@ -94,6 +94,11 @@ impl std::str::FromStr for Stance {
 /// Per-thread-item character limit (X's per-post limit).
 pub const THREAD_ITEM_MAX_CHARS: usize = 280;
 
+/// Hard cap on number of thread items. Defends against an agent that
+/// emits a runaway thread of cited URLs. Generous — typical threads
+/// are 2–4 items.
+pub const MAX_THREAD_ITEMS: usize = 10;
+
 /// Raw JSON shape printed by the agent before contract validation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RawAgentReturn {
@@ -191,6 +196,12 @@ impl RawAgentReturn {
 }
 
 fn validate_thread_items(items: Vec<String>) -> Result<Vec<String>, AgentValidationError> {
+    if items.len() > MAX_THREAD_ITEMS {
+        return Err(AgentValidationError::ThreadTooLong {
+            len: items.len(),
+            max: MAX_THREAD_ITEMS,
+        });
+    }
     let mut validated = Vec::with_capacity(items.len());
     for (index, item) in items.into_iter().enumerate() {
         let trimmed = item.trim().to_string();
@@ -237,6 +248,8 @@ pub enum AgentValidationError {
         len: usize,
         max: usize,
     },
+    #[error("thread has {len} items, exceeds limit of {max}")]
+    ThreadTooLong { len: usize, max: usize },
 }
 
 /// Publishing mode for X posts.
@@ -482,6 +495,26 @@ mod tests {
 
         let error = raw.validate(wiki.path()).expect_err("blank thread item");
         assert_eq!(error, AgentValidationError::BlankThreadItem { index: 1 });
+    }
+
+    #[test]
+    fn validation_rejects_thread_with_more_than_max_items() {
+        let wiki = wiki_with_files();
+        let mut raw = valid_raw();
+        raw.thread = Some(
+            (0..MAX_THREAD_ITEMS + 1)
+                .map(|i| format!("item {}", i))
+                .collect(),
+        );
+
+        let error = raw.validate(wiki.path()).expect_err("over-long thread");
+        assert_eq!(
+            error,
+            AgentValidationError::ThreadTooLong {
+                len: MAX_THREAD_ITEMS + 1,
+                max: MAX_THREAD_ITEMS,
+            }
+        );
     }
 
     #[test]
