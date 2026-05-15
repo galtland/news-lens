@@ -3,13 +3,13 @@
 > Working draft for a fork/derivative of `news-tagger` that comments on news from
 > an Austrian-libertarian perspective using the `llm-wiki` corpus as ground truth.
 
-Status: **draft / pre-implementation**, revision 4.
+Status: **draft / pre-implementation**, revision 5.
 
 Working name: **news-lens**. Bikeshed later.
 
 ---
 
-## 0. Locked-in decisions (revision 4)
+## 0. Locked-in decisions (revision 5)
 
 These are settled. The rest of the spec elaborates them. Items struck through were locked in earlier revisions but superseded by later simplifications.
 
@@ -27,6 +27,7 @@ These are settled. The rest of the spec elaborates them. Items struck through we
 12. ~~Per-wiki mutex / concurrency control~~ — superseded by #8. v1 processes posts strictly serially; no concurrency to control.
 13. ~~Per-call cost tracking + daily budget breaker~~ — superseded by #8. Only `[harness] timeout_secs` in v1.
 14. ~~Quarantine + auto-retry on agent failure~~ — superseded by #8. Failures record `stance=failed` and stop.
+15. **X output is a multi-message thread, not a single post.** Agent returns `thread: Vec<String>`; each item ≤ 280 chars; lead post (`thread[0]`) is pure analytic commentary with no headline restatement and no inline links; subsequent item(s) carry URLs to cited wiki articles. The single `one_liner` field was a v4 artifact — restating the headline burned chars and inline `[[wikilinks]]` rendered as garbage on X. (§9 updated accordingly.)
 
 ---
 
@@ -108,11 +109,13 @@ news-lens fetch loop (Rust):
                - draft commentary citing specific slugs
                - write thesis to wiki/theses/<slug>.md
            - run /wiki:lint --fix
-           - print final-line JSON: { stance, raw_path, thesis_path?, thesis_slug? }
+           - print final-line JSON: { stance, raw_path, thesis_path?, thesis_slug?, thread? }
     2. if a thesis was produced:
-         - render reply text (pure Rust, simple template)
-         - publish via X / Nostr (existing news-tagger adapter)
-    3. record_processed in state.sqlite with both wiki paths and platform IDs
+         - render thread items (pure Rust: each agent thread[] entry is one post)
+         - publish via X / Nostr: post thread[0], then reply with thread[1] in the chain,
+           then reply to that with thread[2], etc.
+    3. record_processed in state.sqlite. Only the lead post ID is stored;
+       the rest of the chain is reconstructible from X's "replies to user" view.
 ```
 
 That's the whole pipeline. Two phases per post: agent call (which does ingest + maybe comment), then publish (only if there's a thesis).
@@ -136,16 +139,22 @@ Task:
      See Also conventions. Cite slugs with [[wikilinks]]. Quote the news
      text where you call out a framing.
    - Write it to wiki/theses/<slug>.md.
+   - Build the X thread as a JSON array of strings (each item ≤ 280 chars):
+     - Lead post (thread[0]): pure analytic claim. No headline restatement,
+       no inline links, no [[wikilinks]] — advance a point, do not summarize.
+     - Sources reply(s): URLs in the form {{PUBLIC_BASE_URL}}/<category>/<slug>
+       for each cited article, with minimal framing text.
 4. Run /wiki:lint --fix to heal indexes, See Also backlinks, log.md.
 5. Print the final line as a single JSON object:
    { "stance": "...", "raw_path": "...", "raw_slug": "...",
-     "thesis_path": "...?", "thesis_slug": "...?", "one_liner": "...?" }
+     "thesis_path": "...?", "thesis_slug": "...?", "thread": [...]? }
 
 Constraints:
 - Never invent positions the wiki does not hold.
 - Never cite slugs that don't exist.
-- Keep one_liner <= 240 chars; include it as the first paragraph of the
-  thesis after the H1.
+- Each thread item <= 280 chars. No inline [[...]] in the X thread —
+  those render as literal brackets on X. The thesis lead paragraph
+  (after the H1) is for the wiki and may use wikilinks freely.
 ```
 
 The prompt template is shipped with news-lens at `prompts/process-post.md`. It substitutes `<path>`, `<lens_path>`, post text, post metadata, and a deterministic candidate slug.
@@ -186,6 +195,8 @@ in the connected wiki. Your beliefs are exactly those of the wiki.
 - Cite specific wiki articles by slug.
 - Quote the news's exact wording when calling out a framing.
 - Distinguish factual disagreement from framing disagreement.
+- On the X thread: lead post advances an analytic claim, never restates
+  the news; URLs go in a sources reply, not the lead.
 
 ## Never
 - Insults, partisan slogans, culture-war shorthand.
@@ -237,6 +248,9 @@ args            = ["--print"]
 prompt_template = "/home/user/news-lens/prompts/process-post.md"
 timeout_secs    = 600
 
+[publish]
+public_base_url = "https://douglaz.github.io"
+
 [watch]
 poll_interval_secs = 300
 accounts = ["...", "..."]
@@ -256,7 +270,7 @@ enabled = false
 relays  = ["wss://relay.damus.io"]
 ```
 
-Eight blocks total. No `[budget]`, no per-call cost tracking. `timeout_secs` is the only per-call guardrail; watch your provider dashboard the first few weeks of use. A daily-post cap is the natural place to grow if you need it (§12).
+Nine blocks total. No `[budget]`, no per-call cost tracking. `timeout_secs` is the only per-call guardrail; watch your provider dashboard the first few weeks of use. A daily-post cap is the natural place to grow if you need it (§12). `[publish] public_base_url` is required only when X / Nostr writing is enabled; the agent uses it to construct sources-reply URLs.
 
 ---
 
@@ -264,20 +278,23 @@ Eight blocks total. No `[budget]`, no per-call cost tracking. `timeout_secs` is 
 
 ```json
 {
-  "stance": "critique",
-  "raw_path": "raw/news/2026-05-07-argentina-rent-decontrol.md",
-  "raw_slug": "2026-05-07-argentina-rent-decontrol",
-  "thesis_path": "wiki/theses/on-argentina-rent-decontrol.md",
-  "thesis_slug": "on-argentina-rent-decontrol",
-  "one_liner": "The cap simply cuts the supply they were going to consume — see [[state-power-and-intervention]]."
+  "stance": "endorse",
+  "raw_path": "raw/news/2026-05-12-argentina-rent-decontrol.md",
+  "raw_slug": "2026-05-12-argentina-rent-decontrol",
+  "thesis_path": "wiki/theses/argentina-rent-decontrol-2023.md",
+  "thesis_slug": "argentina-rent-decontrol-2023",
+  "thread": [
+    "Price ceilings manufacture shortages because they suppress the prices that encode landlords' next-best alternatives. Repeal restores the supply that was being held off the market. The corpus has Mises and Rothbard on this directly.",
+    "Sources: https://douglaz.github.io/concepts/economic-calculation-problem https://douglaz.github.io/references/man-economy-and-state https://douglaz.github.io/theses/argentina-rent-decontrol-2023"
+  ]
 }
 ```
 
 Validation by news-lens before publishing:
 - `stance` is one of `endorse | critique | contextualize | decline | failed`.
 - `raw_path` must exist on disk.
-- If `stance != "decline"`: `thesis_path`, `thesis_slug`, `one_liner` must be present, and the path must exist.
-- `one_liner.len() <= 240` (truncate gently if not).
+- If `stance != "decline"`: `thesis_path`, `thesis_slug`, `thread` must be present, the path must exist, and `thread` must be a non-empty array of strings.
+- Each `thread[i]` is trimmed, non-empty, and `<= 280` chars (X's per-post limit).
 
 Failure mode is simple: malformed JSON, missing path, timeout, or any harness error → record `stance='failed'` in state with whatever fields the agent did return, and move on to the next post. No retries, no quarantine. The user re-runs by hand via `news-lens process --post <id>` if they want.
 
