@@ -60,6 +60,10 @@ fn process_post_with_stub_harness_outputs_valid_json() {
     assert_eq!(value["stance"], "critique");
     assert_eq!(value["raw_path"], "raw/news/test-news-item.md");
     assert_eq!(value["thesis_slug"], "test-thesis");
+    assert!(value.get("one_liner").is_none());
+    let thread = value["thread"].as_array().expect("thread array");
+    assert_eq!(thread.len(), 2);
+    assert_eq!(thread[0], "A concise fixture lead grounded in the wiki.");
 }
 
 #[test]
@@ -175,12 +179,22 @@ fn process_jsonl_require_approval_writes_outbox_and_state() {
     assert!(result["nostr_event_id"].is_null());
 
     let outbox = fs::read_to_string(&outbox_path).expect("read outbox");
-    let value: Value = serde_json::from_str(outbox.trim()).expect("valid outbox json");
-    assert_eq!(value["platform"], "x");
-    assert_eq!(value["source_post_id"], "fixture-1");
+    let entries: Vec<Value> = outbox
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("valid outbox json line"))
+        .collect();
+    // The agent's thread becomes one outbox entry per thread item.
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["platform"], "x");
+    assert_eq!(entries[0]["source_post_id"], "fixture-1");
     assert_eq!(
-        value["text"],
-        "A concise fixture line grounded in the wiki."
+        entries[0]["text"],
+        "A concise fixture lead grounded in the wiki."
+    );
+    assert_eq!(
+        entries[1]["text"],
+        "Sources: https://example.test/concepts/foo"
     );
 }
 
@@ -211,10 +225,21 @@ fn process_jsonl_require_approval_new_post_outbox_includes_source_link() {
         .success();
 
     let outbox = fs::read_to_string(&outbox_path).expect("read outbox");
-    let value: Value = serde_json::from_str(outbox.trim()).expect("valid outbox json");
+    let entries: Vec<Value> = outbox
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("valid outbox json line"))
+        .collect();
+    assert_eq!(entries.len(), 2);
+    // new_post mode appends the source URL to the lead item only.
     assert_eq!(
-        value["text"],
-        "A concise fixture line grounded in the wiki.\n\nhttps://example.com/fixture-1"
+        entries[0]["text"],
+        "A concise fixture lead grounded in the wiki.\n\nhttps://example.com/fixture-1"
+    );
+    // Subsequent thread items are direct replies and carry only the agent text.
+    assert_eq!(
+        entries[1]["text"],
+        "Sources: https://example.test/concepts/foo"
     );
 }
 
