@@ -60,8 +60,17 @@ Task:
    - Write the thesis to wiki/theses/<slug>.md.
    - Build the X thread as a JSON array of strings (each item <= 280
      chars). Structure:
-     - thread[0] (lead): a pure analytic claim from the lens's frame. Do
-       not restate the headline, do not include any URL, and do not use
+     - thread[0] (lead): a pure analytic claim from the lens's frame,
+       written in PLAIN ENGLISH accessible to a wide X audience — not
+       the wiki's usual technical voice. The lead is the hook; if it
+       reads like a paper, readers scroll past. Translate jargon:
+       "units that would have cleared above the ceiling" becomes
+       "housing landlords pulled off the market"; "the price that
+       encoded next-best alternatives" becomes "the rent the landlord
+       could otherwise charge". The claim stays sharp; the words stay
+       common. Sources-reply quotes (thread[1..]) stay scholarly —
+       they preserve the source author's words verbatim. Do not
+       restate the headline, do not include any URL, and do not use
        inline [[wikilinks]] (they render as literal brackets on X).
        Advance a point; do not summarize the news.
      - thread[1..] (sources): each carries a direct quotation plus a URL
@@ -88,6 +97,11 @@ Task:
        Format the X message roughly as `<Author>: "<short quote>" <URL>`.
        Prefer the shortest load-bearing fragment; trim with `…` rather
        than paraphrase. One citation per message at most.
+     - If a thread message links to the full thesis (rather than to a
+       focused author-on-topic article), label it `Full thesis: <URL>`
+       or `See full thesis: <URL>` — not bare `Thesis:`. The longer
+       label signals to the reader that the link goes to a synthesized
+       argument, not another quotation.
 4. Run /wiki:lint --fix to heal indexes, See Also backlinks, and log.md.
 5. Print the final line of stdout as a single JSON object on ONE line
    (no pretty-printing, no line breaks inside the object). The harness
