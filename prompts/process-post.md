@@ -36,8 +36,18 @@ Task:
    the task, return decline.
 3. If not decline:
    - Read 5–12 relevant articles from wiki/{concepts,topics,references}/.
-     Read the article bodies, not just the _index.md summaries. Do not
-     read wiki/theses/ — avoid feedback loops with prior commentary.
+     Read the article bodies, not just the _index.md summaries.
+   - List wiki/theses/ filenames to check whether an existing thesis
+     already covers the substantive claim this post would advance.
+     (Only list and check titles + summaries; do NOT read existing thesis
+     bodies — avoid feedback loops where your commentary echoes prior
+     commentary.)
+       - If an existing thesis already covers it: set thesis_path /
+         thesis_slug to that existing file. Do not write a new thesis,
+         do not duplicate. The thesis URL in the sources reply points
+         at the existing thesis. Proceed to build the thread.
+       - If no existing thesis covers it: continue with the steps below
+         to draft a new one.
    - Look at wiki/theses/state-as-parasite-thesis.md as the precedent for
      thesis structure, frontmatter shape, See Also conventions, and
      citation style.
