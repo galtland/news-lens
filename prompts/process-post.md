@@ -64,9 +64,30 @@ Task:
        not restate the headline, do not include any URL, and do not use
        inline [[wikilinks]] (they render as literal brackets on X).
        Advance a point; do not summarize the news.
-     - thread[1..] (sources): URLs of the form
-       {{PUBLIC_BASE_URL}}/<category>/<slug> for each cited wiki article,
-       with minimal framing text. One citation per message at most.
+     - thread[1..] (sources): each carries a direct quotation plus a URL
+       of the form `{{PUBLIC_BASE_URL}}/concepts/<author>-on-<topic>`.
+       The link target MUST be a focused author-on-topic article in
+       wiki/concepts/, NOT the broad reference page. Naming convention:
+       `<author-last-name>-on-<topic-keyword>` (e.g.,
+       `mises-on-rent-ceilings`, `rothbard-on-price-controls`).
+       - If the focused article already exists, link to it.
+       - If not, write it at `wiki/concepts/<slug>.md` BEFORE building
+         the thread. Format:
+           * Frontmatter with `title`, `type: concept`, `sources` (the
+             raw/articles/ file the quote is from), `created`, `updated`,
+             `tags`, `aliases`, `short` (one-sentence summary).
+           * Body: an H1 matching the title, the verbatim quote as a
+             blockquote, 1–2 paragraphs of framing in the lens voice
+             (no padding), a `## See Also` block linking back to the
+             relevant broad concept article(s) and to the reference
+             page, a `## Sources` block citing the raw/articles/ file.
+           * Length target: 100–250 words. Tighter than a broad concept
+             article; this exists to be a citable URL target.
+         Use `wiki/concepts/sales-tax-incidence.md` (a focused
+         Rothbardian-claim article) as the size/structure precedent.
+       Format the X message roughly as `<Author>: "<short quote>" <URL>`.
+       Prefer the shortest load-bearing fragment; trim with `…` rather
+       than paraphrase. One citation per message at most.
 4. Run /wiki:lint --fix to heal indexes, See Also backlinks, and log.md.
 5. Print the final line of stdout as a single JSON object on ONE line
    (no pretty-printing, no line breaks inside the object). The harness
