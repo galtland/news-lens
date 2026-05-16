@@ -90,6 +90,12 @@ Task:
              (no padding), a `## See Also` block linking back to the
              relevant broad concept article(s) and to the reference
              page, a `## Sources` block citing the raw/articles/ file.
+           * Inline citations in the body must use the wiki's dual-link
+             pattern when naming a book or another wiki article — e.g.
+             `[[human-action|Human Action]] ([Human Action](../references/human-action.md))`,
+             not bare italic `*Human Action*`. Every mention of a book
+             or author whose reference page exists in the wiki should
+             be a clickable dual-link in the prose, not only in See Also.
            * Length target: 100–250 words. Tighter than a broad concept
              article; this exists to be a citable URL target.
          Use `wiki/concepts/sales-tax-incidence.md` (a focused
