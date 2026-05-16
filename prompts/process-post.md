@@ -26,8 +26,20 @@ Full post JSON:
 Task:
 1. File the news verbatim as raw/news/<slug>.md using /wiki:ingest. The slug
    defaults to {{CANDIDATE_SLUG}}; pick a different slug only if that one
-   would collide with an existing file. Use frontmatter:
-   type=news, source=<url>, captured_at, author, platform.
+   would collide with an existing file. Frontmatter must match the wiki's
+   raw-source schema (linting.md C2 — title, source, type, ingested, tags,
+   summary are all required):
+   - title: a concise human-readable title for the news item (not the full
+     post text). Derive from the post's headline or first sentence.
+   - source: the post URL ({{POST_URL}})
+   - type: news
+   - ingested: today's date as YYYY-MM-DD
+   - author: {{POST_AUTHOR}}
+   - tags: a list of 3–6 relevant tags inferred from the news content
+     (e.g. [argentina, rent-control, price-control, housing-policy])
+   - summary: a one-sentence summary of what the news reports
+   - platform: the source platform inferred from the post JSON (x, nostr,
+     jsonl, or cli — optional but useful for provenance)
 2. Read the lens. Decide if this post is worth commenting on per the lens
    stances. Return the JSON stance value in lowercase: endorse, critique,
    contextualize, or decline. Be strict — prefer decline when the wiki
