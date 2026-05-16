@@ -136,3 +136,12 @@ Constraints:
 - Each thread item is at most 280 characters. No inline [[wikilinks]] in
   the X thread — those render as literal brackets on X. The thesis lead
   paragraph (after the H1) is for the wiki and may use wikilinks freely.
+- Dual-link every wiki-entity reference in any wiki body you write. Before
+  writing `*Title*` for a book or author, check `wiki/references/` for a
+  matching page (by `title:` field or `aliases:` entry). If one exists, the
+  inline reference MUST be the dual-link form
+  `[[slug|Title]] ([Title](relative-path.md))` — never bare italic. This
+  applies on EVERY mention, not just the first; in thesis bodies, focused-
+  article bodies, and anywhere else under wiki/. Bare italic is reserved
+  for emphasis of non-wiki terms only. (Frontmatter fields like `short:`,
+  `summary:`, `aliases:` stay plain text — no wikilinks inside YAML.)
