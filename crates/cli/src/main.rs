@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
         Commands::Lens(args) => commands::lens::execute(args, cli.config).await,
         Commands::Config(args) => commands::config::execute(args).await,
         Commands::Doctor(args) => commands::doctor::execute(args, cli.config).await,
+        Commands::Gaps(args) => commands::gaps::execute(args, cli.config).await,
     }
 }
 

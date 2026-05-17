@@ -59,6 +59,7 @@ impl SqliteStateStore {
     async fn run_migrations(&self) -> Result<(), StateError> {
         self.create_processed_posts_table("processed_posts").await?;
         self.migrate_processed_posts_primary_key().await?;
+        self.add_gaps_column_if_missing().await?;
 
         sqlx::query(
             r#"
@@ -137,6 +138,18 @@ impl SqliteStateStore {
         Ok(())
     }
 
+    async fn add_gaps_column_if_missing(&self) -> Result<(), StateError> {
+        let columns = self.table_columns("processed_posts").await?;
+        if columns.iter().any(|c| c == "gaps") {
+            return Ok(());
+        }
+        sqlx::query("ALTER TABLE processed_posts ADD COLUMN gaps TEXT")
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        Ok(())
+    }
+
     async fn table_exists(&self, table: &str) -> Result<bool, StateError> {
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
@@ -157,7 +170,6 @@ impl SqliteStateStore {
         Ok(rows.into_iter().map(|(name,)| name).collect())
     }
 
-    #[cfg(test)]
     async fn table_columns(&self, table: &str) -> Result<Vec<String>, StateError> {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT name FROM pragma_table_info(?) ORDER BY cid")
@@ -181,6 +193,7 @@ fn processed_posts_table_sql(table: &str) -> String {
                 thesis_slug    TEXT,
                 x_post_id      TEXT,
                 nostr_event_id TEXT,
+                gaps           TEXT,
                 PRIMARY KEY (post_id, lens_id)
             )
             "#
@@ -245,19 +258,27 @@ impl StateStore for SqliteStateStore {
 
     async fn record_processed(&self, record: &ProcessedPostRecord) -> Result<(), StateError> {
         let processed_at = format_time(record.processed_at)?;
+        let gaps_json = record
+            .gaps
+            .as_ref()
+            .filter(|g| !g.is_empty())
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StateError::Serialization(error.to_string()))?;
 
         sqlx::query(
             r#"
             INSERT INTO processed_posts
-            (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (post_id, lens_id, processed_at, stance, raw_path, thesis_slug, x_post_id, nostr_event_id, gaps)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(post_id, lens_id) DO UPDATE SET
                 processed_at = excluded.processed_at,
                 stance = excluded.stance,
                 raw_path = excluded.raw_path,
                 thesis_slug = excluded.thesis_slug,
                 x_post_id = excluded.x_post_id,
-                nostr_event_id = excluded.nostr_event_id
+                nostr_event_id = excluded.nostr_event_id,
+                gaps = excluded.gaps
             "#,
         )
         .bind(&record.post_id)
@@ -268,6 +289,7 @@ impl StateStore for SqliteStateStore {
         .bind(&record.thesis_slug)
         .bind(&record.x_post_id)
         .bind(&record.nostr_event_id)
+        .bind(&gaps_json)
         .execute(&self.pool)
         .await
         .map_err(|error| StateError::Database(error.to_string()))?;
@@ -289,10 +311,11 @@ impl StateStore for SqliteStateStore {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         )> = sqlx::query_as(
             r#"
             SELECT post_id, lens_id, processed_at, stance, raw_path, thesis_slug,
-                   x_post_id, nostr_event_id
+                   x_post_id, nostr_event_id, gaps
             FROM processed_posts
             WHERE post_id = ? AND lens_id = ?
             "#,
@@ -313,6 +336,7 @@ impl StateStore for SqliteStateStore {
                 thesis_slug,
                 x_post_id,
                 nostr_event_id,
+                gaps,
             )) => Ok(Some(ProcessedPostRecord {
                 post_id,
                 lens_id,
@@ -326,9 +350,109 @@ impl StateStore for SqliteStateStore {
                 thesis_slug,
                 x_post_id,
                 nostr_event_id,
+                gaps: parse_gaps(gaps.as_deref())?,
             })),
             None => Ok(None),
         }
+    }
+
+    async fn list_processed_with_gaps(
+        &self,
+        lens_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<ProcessedPostRecord>, StateError> {
+        let limit_clause = limit.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
+        let (sql, bind_lens) = match lens_id {
+            Some(_) => (
+                format!(
+                    r#"
+                    SELECT post_id, lens_id, processed_at, stance, raw_path, thesis_slug,
+                           x_post_id, nostr_event_id, gaps
+                    FROM processed_posts
+                    WHERE gaps IS NOT NULL AND gaps != '' AND lens_id = ?
+                    ORDER BY processed_at DESC{limit_clause}
+                    "#
+                ),
+                true,
+            ),
+            None => (
+                format!(
+                    r#"
+                    SELECT post_id, lens_id, processed_at, stance, raw_path, thesis_slug,
+                           x_post_id, nostr_event_id, gaps
+                    FROM processed_posts
+                    WHERE gaps IS NOT NULL AND gaps != ''
+                    ORDER BY processed_at DESC{limit_clause}
+                    "#
+                ),
+                false,
+            ),
+        };
+
+        let mut query = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(&sql);
+        if bind_lens {
+            query = query.bind(lens_id.unwrap());
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| StateError::Database(error.to_string()))?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    post_id,
+                    lens_id,
+                    processed_at,
+                    stance,
+                    raw_path,
+                    thesis_slug,
+                    x_post_id,
+                    nostr_event_id,
+                    gaps,
+                )| {
+                    Ok(ProcessedPostRecord {
+                        post_id,
+                        lens_id,
+                        processed_at: parse_time(&processed_at)?,
+                        stance: stance.parse().map_err(
+                            |error: news_lens_domain::AgentValidationError| {
+                                StateError::Serialization(error.to_string())
+                            },
+                        )?,
+                        raw_path,
+                        thesis_slug,
+                        x_post_id,
+                        nostr_event_id,
+                        gaps: parse_gaps(gaps.as_deref())?,
+                    })
+                },
+            )
+            .collect()
+    }
+}
+
+fn parse_gaps(raw: Option<&str>) -> Result<Option<Vec<String>>, StateError> {
+    match raw {
+        None => Ok(None),
+        Some("") => Ok(None),
+        Some(s) => serde_json::from_str::<Vec<String>>(s)
+            .map(|v| if v.is_empty() { None } else { Some(v) })
+            .map_err(|error| StateError::Serialization(error.to_string())),
     }
 }
 
@@ -378,6 +502,10 @@ mod tests {
             thesis_slug: Some("post".to_string()),
             x_post_id: Some("xpost789".to_string()),
             nostr_event_id: None,
+            gaps: Some(vec![
+                "wiki has no focused article on X".to_string(),
+                "wiki has no focused article on Y (suggest: ingest Z)".to_string(),
+            ]),
         };
 
         store.record_processed(&record).await.unwrap();
@@ -386,8 +514,26 @@ mod tests {
         assert!(!store.is_processed("post123", "other-lens").await.unwrap());
         assert!(!store.is_processed("other-post", "lens").await.unwrap());
 
-        let retrieved = store.get_processed("post123", "lens").await.unwrap();
-        assert_eq!(retrieved.unwrap().x_post_id, Some("xpost789".to_string()));
+        let retrieved = store
+            .get_processed("post123", "lens")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retrieved.x_post_id, Some("xpost789".to_string()));
+        assert_eq!(
+            retrieved.gaps,
+            Some(vec![
+                "wiki has no focused article on X".to_string(),
+                "wiki has no focused article on Y (suggest: ingest Z)".to_string(),
+            ])
+        );
+
+        let with_gaps = store
+            .list_processed_with_gaps(Some("lens"), None)
+            .await
+            .unwrap();
+        assert_eq!(with_gaps.len(), 1);
+        assert_eq!(with_gaps[0].post_id, "post123");
     }
 
     #[tokio::test]
@@ -422,7 +568,8 @@ mod tests {
                 "raw_path",
                 "thesis_slug",
                 "x_post_id",
-                "nostr_event_id"
+                "nostr_event_id",
+                "gaps",
             ]
         );
         assert!(!processed.iter().any(|column| column == "taxonomy_hash"));
@@ -490,6 +637,7 @@ mod tests {
             thesis_slug: Some("post-b".to_string()),
             x_post_id: None,
             nostr_event_id: None,
+            gaps: None,
         };
         store.record_processed(&record).await.unwrap();
 

@@ -431,6 +431,7 @@ where
             thesis_slug,
             x_post_id: None,
             nostr_event_id: None,
+            gaps: None,
         };
         self.state_store.record_processed(&record).await
     }
@@ -451,6 +452,7 @@ where
             thesis_slug: agent_return.thesis_slug.clone(),
             x_post_id,
             nostr_event_id,
+            gaps: agent_return.gaps.clone(),
         };
         self.state_store.record_processed(&record).await
     }
@@ -657,6 +659,7 @@ mod tests {
                     thesis_path: None,
                     thesis_slug: Some("partial-thesis".to_string()),
                     thread: Some(vec!["Partial lead.".to_string()]),
+                    gaps: None,
                 }),
             })
         }
@@ -679,6 +682,7 @@ mod tests {
                     thesis_path: None,
                     thesis_slug: Some("partial-thesis".to_string()),
                     thread: None,
+                    gaps: None,
                 })),
             })
         }
@@ -828,6 +832,14 @@ mod tests {
                 .get(&(post_id.to_string(), lens_id.to_string()))
                 .cloned())
         }
+
+        async fn list_processed_with_gaps(
+            &self,
+            _lens_id: Option<&str>,
+            _limit: Option<u32>,
+        ) -> Result<Vec<ProcessedPostRecord>, StateError> {
+            Ok(Vec::new())
+        }
     }
 
     #[derive(Default)]
@@ -873,6 +885,7 @@ mod tests {
                 "Lead analytic claim.".to_string(),
                 "Sources: https://example.test/concepts/foo".to_string(),
             ]),
+            gaps: None,
         }
     }
 
@@ -893,6 +906,7 @@ mod tests {
             thesis_path: None,
             thesis_slug: None,
             thread: None,
+            gaps: None,
         }
     }
 
@@ -953,6 +967,7 @@ mod tests {
                 thesis_slug: None,
                 x_post_id: None,
                 nostr_event_id: None,
+                gaps: None,
             })
             .await
             .expect("preload state");

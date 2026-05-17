@@ -23,6 +23,10 @@ Post text:
 Full post JSON:
 {{POST_JSON}}
 
+The target wiki slug is the basename of {{WIKI_PATH}} (e.g., `libertarian`
+when the path is `/home/user/wiki/topics/libertarian`). Pass that slug to
+every wiki skill invocation via `--wiki <slug>`.
+
 Task:
 1. File the news verbatim as raw/news/<slug>.md using /wiki:ingest. The slug
    defaults to {{CANDIDATE_SLUG}}; pick a different slug only if that one
@@ -47,24 +51,54 @@ Task:
    reserved for news-lens-side errors. If you genuinely cannot complete
    the task, return decline.
 3. If not decline:
-   - Read 5–12 relevant articles from wiki/{concepts,topics,references}/.
-     Read the article bodies, not just the _index.md summaries.
-   - List wiki/theses/ filenames to check whether an existing thesis
-     already covers the substantive claim this post would advance.
-     (Only list and check titles + summaries; do NOT read existing thesis
-     bodies — avoid feedback loops where your commentary echoes prior
-     commentary.)
+   - Discover wiki coverage via /wiki:query. Invoke:
+       /wiki:query --wiki <slug> --deep "<one-sentence question that
+       names the substantive claim or framing the news engages>"
+     Phrase the question to name the WIKI FRAMES the news touches, not
+     the news event itself. For an EU wealth-tax directive, ask
+     `what does the wiki say about wealth taxes, capital consumption,
+     and redistributive taxation?` — NOT
+     `what does the wiki say about the May 2026 EU wealth tax directive?`.
+     The question primes the wiki's analytic frames; the news provides
+     the instance.
+
+     /wiki:query --deep returns four labeled sections you must read in
+     full:
+       * The answer prose — identifies which frames are load-bearing
+         for this case
+       * `Sources used:` — list of articles with confidence levels;
+         THESE are the articles your thesis cites. Do not pad with
+         canonical-author pages that did not appear here.
+       * `Related in other wikis:` — ignore unless a sibling wiki
+         carries a load-bearing claim the target wiki lacks
+       * `Knowledge gaps:` — copy each gap line VERBATIM into the
+         gaps[] field of the final JSON. Do NOT fabricate gaps the
+         query did not produce.
+
+     If /wiki:query reports zero relevant articles, prefer decline
+     (the wiki has nothing substantive to add) rather than stretching
+     an unrelated frame. Forward the query's gaps[] regardless of
+     stance — declining a news item is itself a signal about coverage.
+
+     Do NOT supplement /wiki:query with ad-hoc Read/Glob/Grep through
+     `wiki/{concepts,topics,references}/`. The query already did that
+     work via its 3-hop and full-index passes; redoing it manually
+     reintroduces the priming-by-author-list bias the trimmed lens
+     was meant to eliminate. The one exception is reading a specific
+     article body that `Sources used:` named — that is appropriate.
+   - List wiki/theses/ filenames via Glob to check whether an existing
+     thesis already covers the substantive claim this post would
+     advance. Use Glob, not /wiki:query — this is a filename check, not
+     a content query. Do NOT read existing thesis bodies — avoid
+     feedback loops where your commentary echoes prior commentary.
        - If an existing thesis already covers it: set thesis_path /
          thesis_slug to that existing file. Do not write a new thesis,
          do not duplicate. The thesis URL in the sources reply points
          at the existing thesis. Proceed to build the thread.
        - If no existing thesis covers it: continue with the steps below
          to draft a new one.
-   - Look at wiki/theses/state-as-parasite-thesis.md as the precedent for
-     thesis structure, frontmatter shape, See Also conventions, and
-     citation style.
-   - Draft a thesis article that matches that precedent. Cite related
-     wiki articles using the wiki's dual link style:
+   - Draft a thesis article. Cite the wiki articles /wiki:query named
+     in its `Sources used:` section, using the wiki's dual link style:
        [[slug|Title]] ([Title](relative-path.md))
      where relative-path is from wiki/theses/ to the cited article (for
      example: ../concepts/state-power-and-intervention.md). Quote the
@@ -91,7 +125,9 @@ Task:
        wiki/concepts/, NOT the broad reference page. Naming convention:
        `<author-last-name>-on-<topic-keyword>` (e.g.,
        `mises-on-rent-ceilings`, `rothbard-on-price-controls`).
-       - If the focused article already exists, link to it.
+       - If the focused article already exists (it appeared in
+         /wiki:query's `Sources used:` section, or you found it via
+         Glob), link to it.
        - If not, write it at `wiki/concepts/<slug>.md` BEFORE building
          the thread. Format:
            * Frontmatter with `title`, `type: concept`, `sources` (the
@@ -120,15 +156,30 @@ Task:
        or `See full thesis: <URL>` — not bare `Thesis:`. The longer
        label signals to the reader that the link goes to a synthesized
        argument, not another quotation.
-4. Run /wiki:lint --fix to heal indexes, See Also backlinks, and log.md.
+4. Run /wiki:lint --fix --wiki <slug> to heal indexes, See Also
+   backlinks, and log.md.
 5. Print the final line of stdout as a single JSON object on ONE line
    (no pretty-printing, no line breaks inside the object). The harness
    parses each stdout line independently and rejects multi-line JSON.
    Shape:
-   { "stance": "...", "raw_path": "...", "raw_slug": "...", "thesis_path": "...?", "thesis_slug": "...?", "thread": ["..."]? }
+   { "stance": "...", "raw_path": "...", "raw_slug": "...", "thesis_path": "...?", "thesis_slug": "...?", "thread": ["..."]?, "gaps": ["..."]? }
+
+   The `gaps[]` field is optional. It carries the `Knowledge gaps:`
+   entries from /wiki:query --deep verbatim, one per array element.
+   Each entry is a one-sentence statement of what the wiki does not
+   cover that would have helped, with an optional trailing
+   `(suggest: ingest <source>)` clause when /wiki:query named a
+   specific source to ingest. Omit `gaps[]` only when /wiki:query
+   reported no gaps. The harness persists gaps to the state DB and
+   surfaces them via the `news-lens gaps` subcommand; do not invent
+   gaps the query did not produce.
+
    Example (one line):
-   {"stance":"endorse","raw_path":"raw/news/2026-05-12-argentina-rent-decontrol.md","raw_slug":"2026-05-12-argentina-rent-decontrol","thesis_path":"wiki/theses/argentina-rent-decontrol-2023.md","thesis_slug":"argentina-rent-decontrol-2023","thread":["Price ceilings manufacture shortages because they suppress the prices that encode landlords' next-best alternatives. Repeal restores the supply held off the market.","Sources: {{PUBLIC_BASE_URL}}/concepts/economic-calculation-problem {{PUBLIC_BASE_URL}}/references/man-economy-and-state"]}
-   On decline, omit thesis_path, thesis_slug, and thread.
+   {"stance":"endorse","raw_path":"raw/news/2026-05-12-argentina-rent-decontrol.md","raw_slug":"2026-05-12-argentina-rent-decontrol","thesis_path":"wiki/theses/argentina-rent-decontrol-2023.md","thesis_slug":"argentina-rent-decontrol-2023","thread":["Rent ceilings don't redistribute housing — they pull it off the market…"],"gaps":["wiki has no focused article on the post-repeal supply-elasticity timeline (suggest: ingest Hayek's 'Use of Knowledge in Society' Q4 1945)"]}
+
+   On decline, omit thesis_path, thesis_slug, and thread. gaps[] may
+   still be present — declining is itself a coverage signal worth
+   forwarding.
 
 Constraints:
 - Never invent positions the wiki does not hold.

@@ -183,6 +183,14 @@ pub trait StateStore: Send + Sync {
         post_id: &str,
         lens_id: &str,
     ) -> Result<Option<ProcessedPostRecord>, StateError>;
+
+    /// List processed-post records that captured non-empty `gaps`, newest first.
+    /// Used by `news-lens gaps` to surface coverage gaps the agent reported.
+    async fn list_processed_with_gaps(
+        &self,
+        lens_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<ProcessedPostRecord>, StateError>;
 }
 
 /// Port for time/clock operations (enables deterministic testing).

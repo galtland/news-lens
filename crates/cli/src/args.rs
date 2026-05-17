@@ -39,6 +39,9 @@ pub enum Commands {
 
     /// Validate configuration and show status.
     Doctor(DoctorArgs),
+
+    /// List wiki-coverage gaps reported by the agent during processing.
+    Gaps(GapsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -137,6 +140,25 @@ pub enum ConfigCommands {
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
     /// Output as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct GapsArgs {
+    /// Limit number of records returned (default: all).
+    #[arg(long)]
+    pub limit: Option<u32>,
+
+    /// Filter to records from a specific lens id (default: the configured lens).
+    #[arg(long)]
+    pub lens: Option<String>,
+
+    /// Show all lenses, not just the configured one.
+    #[arg(long, conflicts_with = "lens")]
+    pub all_lenses: bool,
+
+    /// Output as JSON instead of plain text.
     #[arg(long)]
     pub json: bool,
 }

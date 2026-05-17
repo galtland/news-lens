@@ -78,6 +78,28 @@ impl StateStore for InMemoryStateStore {
             .get(&(post_id.to_string(), lens_id.to_string()))
             .cloned())
     }
+
+    async fn list_processed_with_gaps(
+        &self,
+        lens_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<ProcessedPostRecord>, StateError> {
+        let processed = self
+            .processed
+            .read()
+            .map_err(|error| StateError::Database(error.to_string()))?;
+        let mut records: Vec<ProcessedPostRecord> = processed
+            .values()
+            .filter(|r| r.gaps.as_ref().is_some_and(|g| !g.is_empty()))
+            .filter(|r| lens_id.is_none_or(|id| r.lens_id == id))
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| b.processed_at.cmp(&a.processed_at));
+        if let Some(n) = limit {
+            records.truncate(n as usize);
+        }
+        Ok(records)
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +137,7 @@ mod tests {
             thesis_slug: Some("post".to_string()),
             x_post_id: Some("xpost789".to_string()),
             nostr_event_id: None,
+            gaps: None,
         };
 
         store.record_processed(&record).await.unwrap();

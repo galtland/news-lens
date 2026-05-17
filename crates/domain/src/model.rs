@@ -108,6 +108,9 @@ pub struct RawAgentReturn {
     pub thesis_path: Option<String>,
     pub thesis_slug: Option<String>,
     pub thread: Option<Vec<String>>,
+    /// Knowledge-gap entries verbatim from /wiki:query --deep, when the agent
+    /// invoked it. Each entry is one gap line. Optional and survives any stance.
+    pub gaps: Option<Vec<String>>,
 }
 
 /// Validated JSON return from the agent.
@@ -123,6 +126,8 @@ pub struct AgentReturn {
     pub thesis_slug: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gaps: Option<Vec<String>>,
 }
 
 impl RawAgentReturn {
@@ -139,6 +144,7 @@ impl RawAgentReturn {
         let raw_path = normalize_existing_wiki_file(wiki_root, "raw_path", &raw_path)?;
 
         let validated_thread = self.thread.map(validate_thread_items).transpose()?;
+        let validated_gaps = self.gaps.map(sanitize_gaps).filter(|g| !g.is_empty());
 
         if matches!(
             stance,
@@ -168,6 +174,7 @@ impl RawAgentReturn {
                 thesis_path: Some(thesis_path),
                 thesis_slug: Some(thesis_slug),
                 thread: Some(thread),
+                gaps: validated_gaps,
             });
         }
 
@@ -191,8 +198,20 @@ impl RawAgentReturn {
             thesis_path,
             thesis_slug,
             thread,
+            gaps: validated_gaps,
         })
     }
+}
+
+/// Trim, drop blanks, and dedupe gap entries verbatim from /wiki:query.
+fn sanitize_gaps(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
 }
 
 fn validate_thread_items(items: Vec<String>) -> Result<Vec<String>, AgentValidationError> {
@@ -297,6 +316,10 @@ pub struct ProcessedPostRecord {
     pub thesis_slug: Option<String>,
     pub x_post_id: Option<String>,
     pub nostr_event_id: Option<String>,
+    /// Knowledge gaps surfaced by /wiki:query during this run, persisted so the
+    /// `news-lens gaps` subcommand can list them later. Empty/None when no gaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gaps: Option<Vec<String>>,
 }
 
 /// Processing result for a single post.
@@ -401,6 +424,7 @@ mod tests {
                 "A concise analytic claim.".to_string(),
                 "Sources: https://example.test/concepts/foo".to_string(),
             ]),
+            gaps: None,
         }
     }
 
