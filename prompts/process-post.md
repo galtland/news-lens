@@ -145,3 +145,10 @@ Constraints:
   article bodies, and anywhere else under wiki/. Bare italic is reserved
   for emphasis of non-wiki terms only. (Frontmatter fields like `short:`,
   `summary:`, `aliases:` stay plain text — no wikilinks inside YAML.)
+- This rule applies inside other wikilinks' display text too. Do NOT write
+  `[[focused-slug|Author's *Book*]] ([Author on Topic](path.md))` — the
+  italicized book inside the display text is not a clickable book link.
+  Instead, write the focused-article link and the book-reference link as
+  two adjacent dual-links separated by prose:
+  `[[focused-slug|Author]] ([Author on Topic](path.md)) in [[book-slug|Book]] ([Book](relative-path.md))`.
+  Wikilinks do not nest.
