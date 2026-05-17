@@ -145,12 +145,19 @@ Constraints:
   article bodies, and anywhere else under wiki/. Bare italic is reserved
   for emphasis of non-wiki terms only. (Frontmatter fields like `short:`,
   `summary:`, `aliases:` stay plain text — no wikilinks inside YAML.)
-- This rule applies inside other wikilinks' display text too. Do NOT write
-  `[[focused-slug|Author's *Book*]] ([Author on Topic](path.md))` — the
-  italicized book inside the display text is not a clickable book link.
-  Instead, write the focused-article link and the book-reference link as
-  two adjacent dual-links separated by prose:
-  `[[focused-slug|Author]] ([Author on Topic](path.md)) in [[book-slug|Book]] ([Book](relative-path.md))`.
+- Wikilink display text is always PLAIN. Never put `*italic*` inside
+  `[[slug|...]]` brackets. Wrong: `[[liberalism|*Liberalism*]]`,
+  `[[power-and-market|*Power and Market*]]`,
+  `[[road-to-serfdom|Hayek's *The Road to Serfdom*]]`,
+  `[[focused-slug|Author's *Book*]]`. Right: `[[liberalism|Liberalism]]`,
+  `[[focused-slug|Author]]` plus a second adjacent dual-link to the book.
+  Book titles do not need italic inside a wikilink — the link already
+  renders them as a clickable typographic distinction; italic is
+  redundant and reads on the rendered page as broken styling. If you
+  want to write a book mention AND link to a focused author-on-topic
+  article in the same clause, use two adjacent dual-links with prose
+  between them:
+  `[[focused-slug|Author]] ([Author on Topic](path.md)) in [[book-slug|Book Title]] ([Book Title](relative-path.md))`.
   Wikilinks do not nest.
 - Do NOT run `git`, `git commit`, `git push`, `publish.sh`, or any
   publish/sync script. news-lens only writes wiki files; the parent
