@@ -102,6 +102,10 @@ impl SubprocessHarness {
 
         render_template(&self.prompt_template, &substitutions)
     }
+
+    fn manifest_path(&self, wiki_path: &Path, post_id: &str) -> Result<PathBuf, HarnessError> {
+        manifest_path(wiki_path, post_id)
+    }
 }
 
 fn validate_template(template: &str) -> Result<(), HarnessError> {
@@ -167,7 +171,7 @@ fn template_token_name(token: &str) -> &str {
 #[async_trait]
 impl Harness for SubprocessHarness {
     async fn process_post(&self, ctx: PostContext) -> Result<AgentReturn, HarnessError> {
-        let manifest_path = manifest_path(&ctx.wiki_path, &ctx.post.id);
+        let manifest_path = self.manifest_path(&ctx.wiki_path, &ctx.post.id)?;
         let prompt = self.render_prompt(&ctx, &manifest_path)?;
         let Some(manifest_parent) = manifest_path.parent() else {
             return Err(HarnessError::Io(format!(
@@ -175,9 +179,11 @@ impl Harness for SubprocessHarness {
                 manifest_path.display()
             )));
         };
-        std::fs::create_dir_all(manifest_parent)
+        ensure_wiki_path_exists(&absolute_path(&ctx.wiki_path)?).await?;
+        tokio::fs::create_dir_all(manifest_parent)
+            .await
             .map_err(|error| HarnessError::Io(error.to_string()))?;
-        remove_stale_manifest(&manifest_path)?;
+        remove_stale_manifest(&manifest_path).await?;
         let manifest_path_env = manifest_path.display().to_string();
 
         let mut command = Command::new(&self.config.command);
@@ -219,7 +225,7 @@ impl Harness for SubprocessHarness {
         let stderr = stderr_text.trim().to_string();
 
         if !output.status.success() {
-            let parsed = read_raw_agent_return_manifest(&manifest_path, &stderr_text);
+            let parsed = read_raw_agent_return_manifest(&manifest_path, &stderr_text).await;
             let (raw, parse_error) = match parsed {
                 Ok(raw) => (Some(Box::new(raw)), None),
                 Err(error) => (None, Some(error.to_string())),
@@ -228,17 +234,17 @@ impl Harness for SubprocessHarness {
             return Err(HarnessError::Exit {
                 status: output.status.to_string(),
                 stderr,
-                stdout_tail: stdout_tail(&stdout),
+                stdout_tail: output_tail(&stdout),
                 parse_error,
                 raw,
             });
         }
 
-        let raw = read_raw_agent_return_manifest(&manifest_path, &stderr_text)?;
+        let raw = read_raw_agent_return_manifest(&manifest_path, &stderr_text).await?;
         if let Err(error) = stdin_result {
             tracing::warn!(
                 error = %error,
-                stdout_tail = %stdout_tail(&stdout),
+                stdout_tail = %output_tail(&stdout),
                 stderr = %stderr,
                 "Harness stdin write failed after valid response"
             );
@@ -253,14 +259,24 @@ impl Harness for SubprocessHarness {
     }
 }
 
-fn manifest_path(wiki_path: &Path, post_id: &str) -> PathBuf {
-    wiki_path
+fn manifest_path(wiki_path: &Path, post_id: &str) -> Result<PathBuf, HarnessError> {
+    Ok(absolute_path(wiki_path)?
         .join(".news-lens")
-        .join(format!("{}.json", sanitize_manifest_stem(post_id)))
+        .join(format!("{}.json", sanitize_manifest_post_id(post_id))))
 }
 
-fn sanitize_manifest_stem(post_id: &str) -> String {
-    post_id
+fn absolute_path(path: &Path) -> Result<PathBuf, HarnessError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|error| HarnessError::Io(error.to_string()))
+}
+
+fn sanitize_manifest_post_id(post_id: &str) -> String {
+    let sanitized: String = post_id
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
@@ -269,11 +285,36 @@ fn sanitize_manifest_stem(post_id: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+
+    if sanitized.is_empty() {
+        "post".to_string()
+    } else {
+        sanitized
+    }
 }
 
-fn remove_stale_manifest(manifest_path: &Path) -> Result<(), HarnessError> {
-    match std::fs::remove_file(manifest_path) {
+async fn ensure_wiki_path_exists(wiki_path: &Path) -> Result<(), HarnessError> {
+    let metadata = tokio::fs::metadata(wiki_path).await.map_err(|error| {
+        HarnessError::Io(format!(
+            "could not access wiki path {}: {}",
+            wiki_path.display(),
+            error
+        ))
+    })?;
+
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(HarnessError::Io(format!(
+            "wiki path is not a directory: {}",
+            wiki_path.display()
+        )))
+    }
+}
+
+async fn remove_stale_manifest(manifest_path: &Path) -> Result<(), HarnessError> {
+    match tokio::fs::remove_file(manifest_path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(HarnessError::Io(format!(
@@ -284,16 +325,16 @@ fn remove_stale_manifest(manifest_path: &Path) -> Result<(), HarnessError> {
     }
 }
 
-fn read_raw_agent_return_manifest(
+async fn read_raw_agent_return_manifest(
     manifest_path: &Path,
     stderr: &str,
 ) -> Result<RawAgentReturn, HarnessError> {
-    let bytes = std::fs::read(manifest_path).map_err(|error| {
+    let bytes = tokio::fs::read(manifest_path).await.map_err(|error| {
         HarnessError::InvalidResponse(format!(
             "could not read manifest {}: {}; stderr tail: {}",
             manifest_path.display(),
             error,
-            stderr_tail(stderr)
+            output_tail(stderr)
         ))
     })?;
 
@@ -302,17 +343,9 @@ fn read_raw_agent_return_manifest(
             "manifest {} contained malformed JSON: {}; stderr tail: {}",
             manifest_path.display(),
             error,
-            stderr_tail(stderr)
+            output_tail(stderr)
         ))
     })
-}
-
-fn stdout_tail(stdout: &str) -> String {
-    output_tail(stdout)
-}
-
-fn stderr_tail(stderr: &str) -> String {
-    output_tail(stderr)
 }
 
 fn output_tail(output: &str) -> String {
@@ -484,6 +517,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn harness_passes_absolute_manifest_path_for_relative_wiki_path() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let dir = tempfile::TempDir::new_in(&cwd).expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+        let relative_wiki = wiki
+            .strip_prefix(&cwd)
+            .expect("wiki under cwd")
+            .to_path_buf();
+        assert!(!relative_wiki.is_absolute());
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("absolute-manifest.sh");
+        write_script(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+case "$NEWS_LENS_MANIFEST_PATH" in
+  /*) ;;
+  *)
+    echo "manifest path is relative: $NEWS_LENS_MANIFEST_PATH" >&2
+    exit 9
+    ;;
+esac
+cd /
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Absolute path lead.","Sources: https://example.test/concepts/foo"]}
+EOF
+"#,
+        );
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let result = harness
+            .process_post(make_context(relative_wiki, dir.path().join("lens.md")))
+            .await
+            .expect("harness result");
+
+        assert_eq!(result.raw_path, "raw/news/item.md");
+    }
+
+    #[tokio::test]
     async fn harness_rejects_missing_manifest_after_success() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let wiki = wiki_with_files(dir.path());
@@ -510,7 +593,7 @@ echo "missing manifest sentinel" >&2
         })
         .expect("harness");
 
-        let manifest_path = manifest_path(&wiki, "post-1");
+        let manifest_path = manifest_path(&wiki, "post-1").expect("manifest path");
         let error = harness
             .process_post(make_context(wiki, dir.path().join("lens.md")))
             .await
@@ -549,7 +632,7 @@ printf '{not json\n' >"$NEWS_LENS_MANIFEST_PATH"
         })
         .expect("harness");
 
-        let manifest_path = manifest_path(&wiki, "post-1");
+        let manifest_path = manifest_path(&wiki, "post-1").expect("manifest path");
         let error = harness
             .process_post(make_context(wiki, dir.path().join("lens.md")))
             .await
@@ -562,17 +645,104 @@ printf '{not json\n' >"$NEWS_LENS_MANIFEST_PATH"
     }
 
     #[tokio::test]
+    async fn harness_rejects_missing_wiki_root_without_creating_it() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let missing_wiki = dir.path().join("missing-wiki");
+        let spawned_marker = dir.path().join("spawned");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("should-not-run.sh");
+        write_script(
+            &script,
+            &format!(
+                r#"#!/bin/sh
+cat >/dev/null
+touch "{}"
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{{"stance":"decline","raw_path":"raw/news/item.md","raw_slug":"item"}}
+EOF
+"#,
+                spawned_marker.display()
+            ),
+        );
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let error = harness
+            .process_post(make_context(
+                missing_wiki.clone(),
+                dir.path().join("lens.md"),
+            ))
+            .await
+            .expect_err("missing wiki");
+
+        assert!(matches!(error, HarnessError::Io(message)
+                if message.contains(&missing_wiki.display().to_string())
+                    && message.contains("could not access wiki path")));
+        assert!(!missing_wiki.exists());
+        assert!(!spawned_marker.exists());
+    }
+
+    #[tokio::test]
+    async fn harness_rejects_stale_manifest_removal_failure_before_spawning() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+        let spawned_marker = dir.path().join("spawned");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("should-not-run.sh");
+        write_script(
+            &script,
+            &format!(
+                r#"#!/bin/sh
+cat >/dev/null
+touch "{}"
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{{"stance":"decline","raw_path":"raw/news/item.md","raw_slug":"item"}}
+EOF
+"#,
+                spawned_marker.display()
+            ),
+        );
+
+        let stale_manifest = manifest_path(&wiki, "post-1").expect("manifest path");
+        std::fs::create_dir_all(&stale_manifest).expect("stale manifest dir");
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let error = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect_err("stale manifest removal failure");
+
+        assert!(matches!(error, HarnessError::Io(message)
+                if message.contains(&stale_manifest.display().to_string())
+                    && message.contains("could not remove stale manifest")));
+        assert!(!spawned_marker.exists());
+    }
+
+    #[tokio::test]
     async fn harness_removes_stale_manifest_before_subprocess_executes() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let wiki = wiki_with_files(dir.path());
-        let stale_manifest = manifest_path(&wiki, "post-1");
-        std::fs::create_dir_all(stale_manifest.parent().expect("manifest parent"))
-            .expect("manifest dir");
-        std::fs::write(
-            &stale_manifest,
-            r#"{"stance":"decline","raw_path":"raw/news/stale.md"}"#,
-        )
-        .expect("stale manifest");
 
         let prompt_path = dir.path().join("prompt.md");
         std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
@@ -600,6 +770,14 @@ EOF
             public_base_url: String::new(),
         })
         .expect("harness");
+        let stale_manifest = manifest_path(&wiki, "post-1").expect("manifest path");
+        std::fs::create_dir_all(stale_manifest.parent().expect("manifest parent"))
+            .expect("manifest dir");
+        std::fs::write(
+            &stale_manifest,
+            r#"{"stance":"decline","raw_path":"raw/news/stale.md"}"#,
+        )
+        .expect("stale manifest");
 
         let result = harness
             .process_post(make_context(wiki, dir.path().join("lens.md")))
@@ -611,44 +789,6 @@ EOF
 
         assert_eq!(result.thesis_slug.as_deref(), Some("item"));
         assert_eq!(manifest_value["raw_path"], "raw/news/item.md");
-    }
-
-    #[tokio::test]
-    async fn harness_rejects_stale_manifest_cleanup_failure() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let wiki = wiki_with_files(dir.path());
-        let stale_manifest = manifest_path(&wiki, "post-1");
-        std::fs::create_dir_all(&stale_manifest).expect("stale manifest dir");
-
-        let prompt_path = dir.path().join("prompt.md");
-        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
-
-        let script = dir.path().join("should-not-run.sh");
-        write_script(
-            &script,
-            r#"#!/bin/sh
-echo "subprocess should not run" >&2
-exit 99
-"#,
-        );
-
-        let harness = SubprocessHarness::new(HarnessConfig {
-            command: script.display().to_string(),
-            args: vec![],
-            prompt_template: prompt_path,
-            timeout_secs: 5,
-            public_base_url: String::new(),
-        })
-        .expect("harness");
-
-        let error = harness
-            .process_post(make_context(wiki, dir.path().join("lens.md")))
-            .await
-            .expect_err("cleanup failure");
-
-        assert!(matches!(error, HarnessError::Io(message)
-                if message.contains("could not remove stale manifest")
-                    && message.contains(&stale_manifest.display().to_string())));
     }
 
     #[tokio::test]
@@ -664,10 +804,6 @@ exit 99
             &script,
             r#"#!/bin/sh
 cat >/dev/null
-case "$NEWS_LENS_MANIFEST_PATH" in
-  *".news-lens/post___one_two.json") ;;
-  *) echo "unexpected manifest path: $NEWS_LENS_MANIFEST_PATH" >&2; exit 8 ;;
-esac
 cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
 {"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Sanitized lead.","Sources: https://example.test/concepts/foo"]}
 EOF
@@ -684,10 +820,32 @@ EOF
         .expect("harness");
         let mut ctx = make_context(wiki.clone(), dir.path().join("lens.md"));
         ctx.post.id = "post / one two".to_string();
+        let expected_manifest = manifest_path(&wiki, "post / one two").expect("manifest path");
 
         harness.process_post(ctx).await.expect("harness result");
 
-        assert!(wiki.join(".news-lens/post___one_two.json").exists());
+        let file_name = expected_manifest
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("manifest file name");
+        assert_eq!(file_name, "post___one_two.json");
+        assert!(expected_manifest.exists());
+    }
+
+    #[test]
+    fn manifest_filename_uses_sanitized_post_id() {
+        let wiki = Path::new("/tmp/wiki");
+        let slash = manifest_path(wiki, "foo/123").expect("slash manifest");
+        let space = manifest_path(wiki, "foo 123").expect("space manifest");
+        let empty = manifest_path(wiki, "").expect("empty manifest");
+
+        let slash_name = slash.file_name().and_then(|name| name.to_str()).unwrap();
+        let space_name = space.file_name().and_then(|name| name.to_str()).unwrap();
+        let empty_name = empty.file_name().and_then(|name| name.to_str()).unwrap();
+
+        assert_eq!(slash_name, "foo_123.json");
+        assert_eq!(space_name, "foo_123.json");
+        assert_eq!(empty_name, "post.json");
     }
 
     #[tokio::test]

@@ -11,12 +11,37 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
+fn copy_fixture_wiki(root: &Path) -> PathBuf {
+    let source = workspace_root().join("fixtures/wiki");
+    let wiki = root.join("wiki");
+
+    fs::create_dir_all(wiki.join("raw/news")).expect("raw news dir");
+    fs::create_dir_all(wiki.join("wiki/theses")).expect("theses dir");
+    fs::copy(
+        source.join("raw/news/test-news-item.md"),
+        wiki.join("raw/news/test-news-item.md"),
+    )
+    .expect("copy raw fixture");
+    fs::copy(
+        source.join("wiki/theses/test-thesis.md"),
+        wiki.join("wiki/theses/test-thesis.md"),
+    )
+    .expect("copy thesis fixture");
+
+    wiki
+}
+
 fn fixture_config_with_state(state_path: &Path) -> String {
+    let wiki_path = copy_fixture_wiki(state_path.parent().expect("state path parent"));
     fs::read_to_string(workspace_root().join("fixtures/config/stub-harness.toml"))
         .expect("fixture config")
         .replace(
             r#"state_db_path = "./target/news-lens-fixture-state.sqlite""#,
             &format!(r#"state_db_path = "{}""#, state_path.display()),
+        )
+        .replace(
+            r#"path = "./fixtures/wiki""#,
+            &format!(r#"path = "{}""#, wiki_path.display()),
         )
 }
 
@@ -39,6 +64,11 @@ fn config_init_writes_example_file() {
 
 #[test]
 fn process_post_with_stub_harness_outputs_valid_json() {
+    let dir = TempDir::new().expect("temp dir");
+    let config_path = dir.path().join("config.toml");
+    let state_path = dir.path().join("state.sqlite");
+    fs::write(&config_path, fixture_config_with_state(&state_path)).expect("write config");
+
     let mut cmd = cargo_bin_cmd!("news-lens");
     let output = cmd
         .current_dir(workspace_root())
@@ -49,8 +79,8 @@ fn process_post_with_stub_harness_outputs_valid_json() {
             "Test news item",
             "--dry-run",
             "--config",
-            "fixtures/config/stub-harness.toml",
         ])
+        .arg(&config_path)
         .output()
         .expect("run process");
 

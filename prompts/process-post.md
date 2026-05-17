@@ -159,9 +159,12 @@ Task:
 4. Run /wiki:lint --fix --wiki <slug> to heal indexes, See Also
    backlinks, and log.md.
 5. Write the final run manifest as a JSON file at `{{MANIFEST_PATH}}`.
-   This is the exact path selected by the harness. It lives under
-   `{{WIKI_PATH}}/.news-lens/` with the post id sanitized into the file
-   stem; do not recompute the path or write any other manifest file.
+   This is the exact path selected by the harness. It lives at
+   `{{WIKI_PATH}}/.news-lens/{{POST_ID}}.json`, with the post id
+   sanitized for filesystem safety by replacing characters outside
+   `[A-Za-z0-9_-]` with `_`. The same exact path is also available in
+   `NEWS_LENS_MANIFEST_PATH`. Do not recompute the path or write any
+   other manifest file.
 
    The manifest file is the SOLE contract between you and the harness.
    stdout/stderr are for human narration only. Do not echo the manifest
