@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use news_lens_domain::{AgentReturn, Harness, HarnessError, PostContext, RawAgentReturn};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -16,6 +16,7 @@ const ALLOWED_TEMPLATE_TOKENS: &[&str] = &[
     "{{POST_CREATED_AT}}",
     "{{POST_JSON}}",
     "{{WIKI_PATH}}",
+    "{{MANIFEST_PATH}}",
     "{{LENS_PATH}}",
     "{{LENS_ID}}",
     "{{LENS_VOICE}}",
@@ -62,7 +63,11 @@ impl SubprocessHarness {
         &self.config.prompt_template
     }
 
-    fn render_prompt(&self, ctx: &PostContext) -> Result<String, HarnessError> {
+    fn render_prompt(
+        &self,
+        ctx: &PostContext,
+        manifest_path: &Path,
+    ) -> Result<String, HarnessError> {
         let post_json = serde_json::to_string_pretty(&ctx.post)
             .map_err(|error| HarnessError::Io(error.to_string()))?;
         let created_at = ctx
@@ -71,6 +76,7 @@ impl SubprocessHarness {
             .format(&time::format_description::well_known::Rfc3339)
             .map_err(|error| HarnessError::Io(error.to_string()))?;
         let wiki_path = ctx.wiki_path.display().to_string();
+        let manifest_path = manifest_path.display().to_string();
         let lens_path = ctx.lens.path.display().to_string();
 
         let substitutions = [
@@ -81,6 +87,7 @@ impl SubprocessHarness {
             ("{{POST_CREATED_AT}}", created_at.as_str()),
             ("{{POST_JSON}}", post_json.as_str()),
             ("{{WIKI_PATH}}", wiki_path.as_str()),
+            ("{{MANIFEST_PATH}}", manifest_path.as_str()),
             ("{{LENS_PATH}}", lens_path.as_str()),
             ("{{LENS_ID}}", ctx.lens.id.as_str()),
             ("{{LENS_VOICE}}", ctx.lens.voice.as_deref().unwrap_or("")),
@@ -160,11 +167,23 @@ fn template_token_name(token: &str) -> &str {
 #[async_trait]
 impl Harness for SubprocessHarness {
     async fn process_post(&self, ctx: PostContext) -> Result<AgentReturn, HarnessError> {
-        let prompt = self.render_prompt(&ctx)?;
+        let manifest_path = manifest_path(&ctx.wiki_path, &ctx.post.id);
+        let prompt = self.render_prompt(&ctx, &manifest_path)?;
+        let Some(manifest_parent) = manifest_path.parent() else {
+            return Err(HarnessError::Io(format!(
+                "manifest path has no parent: {}",
+                manifest_path.display()
+            )));
+        };
+        std::fs::create_dir_all(manifest_parent)
+            .map_err(|error| HarnessError::Io(error.to_string()))?;
+        remove_stale_manifest(&manifest_path)?;
+        let manifest_path_env = manifest_path.display().to_string();
 
         let mut command = Command::new(&self.config.command);
         command
             .args(&self.config.args)
+            .env("NEWS_LENS_MANIFEST_PATH", &manifest_path_env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -196,21 +215,26 @@ impl Harness for SubprocessHarness {
             .map_err(|error| HarnessError::Io(error.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let parsed = parse_raw_agent_return(&stdout);
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr_text.trim().to_string();
 
         if !output.status.success() {
-            let parse_error = parsed.as_ref().err().map(ToString::to_string);
+            let parsed = read_raw_agent_return_manifest(&manifest_path, &stderr_text);
+            let (raw, parse_error) = match parsed {
+                Ok(raw) => (Some(Box::new(raw)), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+
             return Err(HarnessError::Exit {
                 status: output.status.to_string(),
                 stderr,
                 stdout_tail: stdout_tail(&stdout),
                 parse_error,
-                raw: parsed.ok().map(Box::new),
+                raw,
             });
         }
 
-        let raw = parsed?;
+        let raw = read_raw_agent_return_manifest(&manifest_path, &stderr_text)?;
         if let Err(error) = stdin_result {
             tracing::warn!(
                 error = %error,
@@ -229,47 +253,70 @@ impl Harness for SubprocessHarness {
     }
 }
 
-fn parse_raw_agent_return(stdout: &str) -> Result<RawAgentReturn, HarnessError> {
-    let mut saw_line = false;
-    let tail = stdout_tail(stdout);
+fn manifest_path(wiki_path: &Path, post_id: &str) -> PathBuf {
+    wiki_path
+        .join(".news-lens")
+        .join(format!("{}.json", sanitize_manifest_stem(post_id)))
+}
 
-    for line in stdout.lines().rev() {
-        let candidate = line.trim().trim_start_matches('\u{feff}').trim();
-        if candidate.is_empty() {
-            continue;
-        }
-        saw_line = true;
+fn sanitize_manifest_stem(post_id: &str) -> String {
+    post_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) else {
-            continue;
-        };
-
-        if value.get("stance").is_none() {
-            continue;
-        }
-
-        return serde_json::from_value::<RawAgentReturn>(value).map_err(|error| {
-            HarnessError::InvalidResponse(format!(
-                "contract JSON line was malformed: {}; line: {}",
-                error, candidate
-            ))
-        });
+fn remove_stale_manifest(manifest_path: &Path) -> Result<(), HarnessError> {
+    match std::fs::remove_file(manifest_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(HarnessError::Io(format!(
+            "could not remove stale manifest {}: {}",
+            manifest_path.display(),
+            error
+        ))),
     }
+}
 
-    if !saw_line {
-        return Err(HarnessError::InvalidResponse(
-            "stdout was empty".to_string(),
-        ));
-    }
+fn read_raw_agent_return_manifest(
+    manifest_path: &Path,
+    stderr: &str,
+) -> Result<RawAgentReturn, HarnessError> {
+    let bytes = std::fs::read(manifest_path).map_err(|error| {
+        HarnessError::InvalidResponse(format!(
+            "could not read manifest {}: {}; stderr tail: {}",
+            manifest_path.display(),
+            error,
+            stderr_tail(stderr)
+        ))
+    })?;
 
-    Err(HarnessError::InvalidResponse(format!(
-        "stdout did not contain contract JSON with a stance field; stdout tail: {}",
-        tail
-    )))
+    serde_json::from_slice::<RawAgentReturn>(&bytes).map_err(|error| {
+        HarnessError::InvalidResponse(format!(
+            "manifest {} contained malformed JSON: {}; stderr tail: {}",
+            manifest_path.display(),
+            error,
+            stderr_tail(stderr)
+        ))
+    })
 }
 
 fn stdout_tail(stdout: &str) -> String {
-    let mut lines = stdout
+    output_tail(stdout)
+}
+
+fn stderr_tail(stderr: &str) -> String {
+    output_tail(stderr)
+}
+
+fn output_tail(output: &str) -> String {
+    let mut lines = output
         .lines()
         .rev()
         .map(str::trim)
@@ -323,6 +370,27 @@ mod tests {
             },
             candidate_slug: "1970-01-01-test-news-item".to_string(),
         }
+    }
+
+    fn wiki_with_files(root: &Path) -> PathBuf {
+        let wiki = root.join("wiki");
+        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
+        std::fs::create_dir_all(wiki.join("theses")).expect("theses dir");
+        std::fs::create_dir_all(wiki.join("wiki/theses")).expect("fixture thesis dir");
+        std::fs::write(wiki.join("raw/news/item.md"), "# News").expect("raw file");
+        std::fs::write(wiki.join("raw/news/test-news-item.md"), "# Fixture news")
+            .expect("fixture raw file");
+        std::fs::write(wiki.join("theses/item.md"), "# Thesis").expect("thesis file");
+        std::fs::write(wiki.join("wiki/theses/test-thesis.md"), "# Fixture thesis")
+            .expect("fixture thesis file");
+        wiki
+    }
+
+    fn write_script(script: &Path, body: &str) {
+        std::fs::write(script, body).expect("script");
+        let mut permissions = std::fs::metadata(script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(script, permissions).expect("chmod");
     }
 
     #[test]
@@ -382,34 +450,147 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn harness_runs_stub_script_and_parses_final_json_line() {
+    async fn harness_reads_manifest_written_by_fixture_script() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let wiki = dir.path().join("wiki");
-        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
-        std::fs::create_dir_all(wiki.join("theses")).expect("theses dir");
-        std::fs::write(wiki.join("raw/news/item.md"), "# News").expect("raw file");
-        std::fs::write(wiki.join("theses/item.md"), "# Thesis").expect("thesis file");
+        let wiki = wiki_with_files(dir.path());
 
         let prompt_path = dir.path().join("prompt.md");
         std::fs::write(
             &prompt_path,
-            "Post: {{POST_TEXT}}\nWiki: {{WIKI_PATH}}\nLens: {{LENS_CONTENT}}\n",
+            "Post: {{POST_TEXT}}\nWiki: {{WIKI_PATH}}\nManifest: {{MANIFEST_PATH}}\nLens: {{LENS_CONTENT}}\n",
         )
         .expect("prompt");
+        let fixture_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures/harness/stub-harness.sh");
 
-        let script = dir.path().join("stub-harness.sh");
-        std::fs::write(
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: "sh".to_string(),
+            args: vec![fixture_script.display().to_string()],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let result = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect("harness result");
+
+        assert_eq!(result.stance, Stance::Critique);
+        assert_eq!(result.raw_path, "raw/news/test-news-item.md");
+        assert_eq!(result.thesis_slug.as_deref(), Some("test-thesis"));
+    }
+
+    #[tokio::test]
+    async fn harness_rejects_missing_manifest_after_success() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("missing-manifest.sh");
+        write_script(
             &script,
             r#"#!/bin/sh
 cat >/dev/null
-echo "diagnostic line"
-echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead analytic claim.","Sources: https://example.test/concepts/foo"]}'
+echo "human stdout"
+echo "missing manifest sentinel" >&2
 "#,
+        );
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let manifest_path = manifest_path(&wiki, "post-1");
+        let error = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect_err("missing manifest");
+
+        assert!(matches!(error, HarnessError::InvalidResponse(message)
+                if message.contains(&manifest_path.display().to_string())
+                    && message.contains("could not read manifest")
+                    && message.contains("missing manifest sentinel")));
+    }
+
+    #[tokio::test]
+    async fn harness_rejects_malformed_manifest_json() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("malformed-manifest.sh");
+        write_script(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+echo "malformed manifest sentinel" >&2
+printf '{not json\n' >"$NEWS_LENS_MANIFEST_PATH"
+"#,
+        );
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let manifest_path = manifest_path(&wiki, "post-1");
+        let error = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect_err("malformed manifest");
+
+        assert!(matches!(error, HarnessError::InvalidResponse(message)
+                if message.contains(&manifest_path.display().to_string())
+                    && message.contains("malformed JSON")
+                    && message.contains("malformed manifest sentinel")));
+    }
+
+    #[tokio::test]
+    async fn harness_removes_stale_manifest_before_subprocess_executes() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+        let stale_manifest = manifest_path(&wiki, "post-1");
+        std::fs::create_dir_all(stale_manifest.parent().expect("manifest parent"))
+            .expect("manifest dir");
+        std::fs::write(
+            &stale_manifest,
+            r#"{"stance":"decline","raw_path":"raw/news/stale.md"}"#,
         )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
+        .expect("stale manifest");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("fresh-manifest.sh");
+        write_script(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+if [ -e "$NEWS_LENS_MANIFEST_PATH" ]; then
+  echo "stale manifest was not removed" >&2
+  exit 9
+fi
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Fresh lead.","Sources: https://example.test/concepts/foo"]}
+EOF
+"#,
+        );
 
         let harness = SubprocessHarness::new(HarnessConfig {
             command: script.display().to_string(),
@@ -424,9 +605,89 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
             .process_post(make_context(wiki, dir.path().join("lens.md")))
             .await
             .expect("harness result");
+        let manifest_value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&stale_manifest).expect("manifest"))
+                .expect("manifest json");
 
-        assert_eq!(result.stance, Stance::Critique);
         assert_eq!(result.thesis_slug.as_deref(), Some("item"));
+        assert_eq!(manifest_value["raw_path"], "raw/news/item.md");
+    }
+
+    #[tokio::test]
+    async fn harness_rejects_stale_manifest_cleanup_failure() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+        let stale_manifest = manifest_path(&wiki, "post-1");
+        std::fs::create_dir_all(&stale_manifest).expect("stale manifest dir");
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("should-not-run.sh");
+        write_script(
+            &script,
+            r#"#!/bin/sh
+echo "subprocess should not run" >&2
+exit 99
+"#,
+        );
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+
+        let error = harness
+            .process_post(make_context(wiki, dir.path().join("lens.md")))
+            .await
+            .expect_err("cleanup failure");
+
+        assert!(matches!(error, HarnessError::Io(message)
+                if message.contains("could not remove stale manifest")
+                    && message.contains(&stale_manifest.display().to_string())));
+    }
+
+    #[tokio::test]
+    async fn harness_sanitizes_manifest_path_post_id() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let wiki = wiki_with_files(dir.path());
+
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
+
+        let script = dir.path().join("sanitized-manifest.sh");
+        write_script(
+            &script,
+            r#"#!/bin/sh
+cat >/dev/null
+case "$NEWS_LENS_MANIFEST_PATH" in
+  *".news-lens/post___one_two.json") ;;
+  *) echo "unexpected manifest path: $NEWS_LENS_MANIFEST_PATH" >&2; exit 8 ;;
+esac
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Sanitized lead.","Sources: https://example.test/concepts/foo"]}
+EOF
+"#,
+        );
+
+        let harness = SubprocessHarness::new(HarnessConfig {
+            command: script.display().to_string(),
+            args: vec![],
+            prompt_template: prompt_path,
+            timeout_secs: 5,
+            public_base_url: String::new(),
+        })
+        .expect("harness");
+        let mut ctx = make_context(wiki.clone(), dir.path().join("lens.md"));
+        ctx.post.id = "post / one two".to_string();
+
+        harness.process_post(ctx).await.expect("harness result");
+
+        assert!(wiki.join(".news-lens/post___one_two.json").exists());
     }
 
     #[tokio::test]
@@ -469,27 +730,21 @@ sleep 5
     #[tokio::test]
     async fn harness_accepts_valid_json_when_child_closes_stdin_early() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let wiki = dir.path().join("wiki");
-        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
-        std::fs::create_dir_all(wiki.join("theses")).expect("theses dir");
-        std::fs::write(wiki.join("raw/news/item.md"), "# News").expect("raw file");
-        std::fs::write(wiki.join("theses/item.md"), "# Thesis").expect("thesis file");
+        let wiki = wiki_with_files(dir.path());
 
         let prompt_path = dir.path().join("prompt.md");
         std::fs::write(&prompt_path, "{{LENS_CONTENT}}").expect("prompt");
 
         let script = dir.path().join("early-close-harness.sh");
-        std::fs::write(
+        write_script(
             &script,
             r#"#!/bin/sh
 exec 0<&-
-echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead analytic claim.","Sources: https://example.test/concepts/foo"]}'
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead analytic claim.","Sources: https://example.test/concepts/foo"]}
+EOF
 "#,
-        )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
+        );
 
         let mut ctx = make_context(wiki, dir.path().join("lens.md"));
         ctx.lens.content = "x".repeat(2_000_000);
@@ -509,79 +764,26 @@ echo '{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thes
     }
 
     #[tokio::test]
-    async fn harness_preserves_contract_json_on_nonzero_exit() {
+    async fn harness_exit_preserves_captured_output_and_manifest_on_nonzero_exit() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let wiki = dir.path().join("wiki");
-        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
-        std::fs::write(wiki.join("raw/news/item.md"), "# News").expect("raw file");
+        let wiki = wiki_with_files(dir.path());
 
         let prompt_path = dir.path().join("prompt.md");
         std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
 
         let script = dir.path().join("failing-harness.sh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-cat >/dev/null
-echo '{"stance":"decline","raw_path":"raw/news/item.md","raw_slug":"item"}'
-echo "cleanup failed" >&2
-exit 7
-"#,
-        )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
-
-        let harness = SubprocessHarness::new(HarnessConfig {
-            command: script.display().to_string(),
-            args: vec![],
-            prompt_template: prompt_path,
-            timeout_secs: 5,
-            public_base_url: String::new(),
-        })
-        .expect("harness");
-
-        let error = harness
-            .process_post(make_context(wiki, dir.path().join("lens.md")))
-            .await
-            .expect_err("non-zero exit");
-
-        match error {
-            HarnessError::Exit { status, raw, .. } => {
-                assert!(status.contains('7'));
-                let raw = raw.expect("contract JSON");
-                assert_eq!(raw.stance.as_deref(), Some("decline"));
-                assert_eq!(raw.raw_path.as_deref(), Some("raw/news/item.md"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn harness_exit_preserves_parse_error_when_contract_json_is_missing() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let wiki = dir.path().join("wiki");
-        std::fs::create_dir_all(wiki.join("raw/news")).expect("raw dir");
-
-        let prompt_path = dir.path().join("prompt.md");
-        std::fs::write(&prompt_path, "{{POST_TEXT}}").expect("prompt");
-
-        let script = dir.path().join("failing-no-contract.sh");
-        std::fs::write(
+        write_script(
             &script,
             r#"#!/bin/sh
 cat >/dev/null
 echo "diagnostic line"
-echo '{"trace_id":"abc"}'
+cat >"$NEWS_LENS_MANIFEST_PATH" <<'EOF'
+{"stance":"decline","raw_path":"raw/news/item.md","raw_slug":"item"}
+EOF
 echo "cleanup failed" >&2
 exit 7
 "#,
-        )
-        .expect("script");
-        let mut permissions = std::fs::metadata(&script).expect("metadata").permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("chmod");
+        );
 
         let harness = SubprocessHarness::new(HarnessConfig {
             command: script.display().to_string(),
@@ -599,18 +801,19 @@ exit 7
 
         match error {
             HarnessError::Exit {
-                parse_error,
+                status,
+                stderr,
                 stdout_tail,
+                parse_error,
                 raw,
-                ..
             } => {
-                assert!(raw.is_none());
+                assert!(status.contains('7'));
+                assert!(stderr.contains("cleanup failed"));
                 assert!(stdout_tail.contains("diagnostic line"));
-                assert!(
-                    parse_error
-                        .as_deref()
-                        .is_some_and(|message| message.contains("stance field"))
-                );
+                assert!(parse_error.is_none());
+                let raw = raw.expect("manifest parsed on exit");
+                assert_eq!(raw.raw_path.as_deref(), Some("raw/news/item.md"));
+                assert_eq!(raw.raw_slug.as_deref(), Some("item"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -647,59 +850,6 @@ exit 7
 
         assert!(
             matches!(error, HarnessError::InvalidTemplate(message) if message.contains("unterminated template token: POST_TEXT"))
-        );
-    }
-
-    #[test]
-    fn parse_raw_agent_return_uses_final_json_line() {
-        let stdout = r#"
-diagnostic line
-{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead item.","Sources item."]}
-"#;
-
-        let raw = parse_raw_agent_return(stdout).expect("raw JSON");
-
-        assert_eq!(raw.stance.as_deref(), Some("critique"));
-        assert_eq!(raw.thesis_slug.as_deref(), Some("item"));
-    }
-
-    #[test]
-    fn parse_raw_agent_return_skips_non_contract_json_after_contract_json() {
-        let stdout = r#"
-{"stance":"critique","raw_path":"raw/news/item.md","raw_slug":"item","thesis_path":"theses/item.md","thesis_slug":"item","thread":["Lead item.","Sources item."]}
-{"trace_id":"abc"}
-"#;
-
-        let raw = parse_raw_agent_return(stdout).expect("raw JSON");
-
-        assert_eq!(raw.stance.as_deref(), Some("critique"));
-        assert_eq!(raw.thesis_slug.as_deref(), Some("item"));
-    }
-
-    #[test]
-    fn parse_raw_agent_return_rejects_output_without_contract_json() {
-        let stdout = r#"
-{"trace_id":"abc"}
-not json
-"#;
-
-        let error = parse_raw_agent_return(stdout).expect_err("missing contract line");
-
-        assert!(
-            matches!(error, HarnessError::InvalidResponse(message) if message.contains("stance field"))
-        );
-    }
-
-    #[test]
-    fn parse_raw_agent_return_rejects_malformed_contract_json_line() {
-        let stdout = r#"
-{"stance":123,"raw_path":"raw/news/item.md"}
-"#;
-
-        let error = parse_raw_agent_return(stdout).expect_err("malformed contract line");
-
-        assert!(
-            matches!(error, HarnessError::InvalidResponse(message) if message.contains("contract JSON line was malformed"))
         );
     }
 }

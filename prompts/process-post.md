@@ -158,27 +158,51 @@ Task:
        argument, not another quotation.
 4. Run /wiki:lint --fix --wiki <slug> to heal indexes, See Also
    backlinks, and log.md.
-5. Print the final line of stdout as a single JSON object on ONE line
-   (no pretty-printing, no line breaks inside the object). The harness
-   parses each stdout line independently and rejects multi-line JSON.
-   Shape:
-   { "stance": "...", "raw_path": "...", "raw_slug": "...", "thesis_path": "...?", "thesis_slug": "...?", "thread": ["..."]?, "gaps": ["..."]? }
+5. Write the final run manifest as a JSON file at `{{MANIFEST_PATH}}`.
+   This is the exact path selected by the harness. It lives under
+   `{{WIKI_PATH}}/.news-lens/` with the post id sanitized into the file
+   stem; do not recompute the path or write any other manifest file.
 
-   The `gaps[]` field is optional. It carries the `Knowledge gaps:`
-   entries from /wiki:query --deep verbatim, one per array element.
-   Each entry is a one-sentence statement of what the wiki does not
-   cover that would have helped, with an optional trailing
-   `(suggest: ingest <source>)` clause when /wiki:query named a
-   specific source to ingest. Omit `gaps[]` only when /wiki:query
-   reported no gaps. The harness persists gaps to the state DB and
-   surfaces them via the `news-lens gaps` subcommand; do not invent
-   gaps the query did not produce.
+   The manifest file is the SOLE contract between you and the harness.
+   stdout/stderr are for human narration only. Do not echo the manifest
+   anywhere. Do not announce "the JSON is..." or otherwise print the
+   manifest contents.
 
-   Example (one line):
-   {"stance":"endorse","raw_path":"raw/news/2026-05-12-argentina-rent-decontrol.md","raw_slug":"2026-05-12-argentina-rent-decontrol","thesis_path":"wiki/theses/argentina-rent-decontrol-2023.md","thesis_slug":"argentina-rent-decontrol-2023","thread":["Rent ceilings don't redistribute housing — they pull it off the market…"],"gaps":["wiki has no focused article on the post-repeal supply-elasticity timeline (suggest: ingest Hayek's 'Use of Knowledge in Society' Q4 1945)"]}
+   Shape: a single JSON object with these fields:
+   - `stance`: endorse, critique, contextualize, or decline
+   - `raw_path`
+   - `raw_slug` (optional)
+   - `thesis_path` (omit on decline)
+   - `thesis_slug` (omit on decline)
+   - `thread` (omit on decline)
+   - `gaps` (optional)
+
+   The `gaps[]` field carries the `Knowledge gaps:` entries from
+   /wiki:query --deep verbatim, one per array element. Each entry is a
+   one-sentence statement of what the wiki does not cover that would
+   have helped, with an optional trailing `(suggest: ingest <source>)`
+   clause when /wiki:query named a specific source to ingest. Omit
+   `gaps[]` only when /wiki:query reported no gaps. The harness persists
+   gaps to the state DB and surfaces them via the `news-lens gaps`
+   subcommand; do not invent gaps the query did not produce.
+
+   Example manifest:
+   {
+     "stance": "endorse",
+     "raw_path": "raw/news/2026-05-12-argentina-rent-decontrol.md",
+     "raw_slug": "2026-05-12-argentina-rent-decontrol",
+     "thesis_path": "wiki/theses/argentina-rent-decontrol-2023.md",
+     "thesis_slug": "argentina-rent-decontrol-2023",
+     "thread": [
+       "Rent ceilings do not redistribute housing - they pull it off the market..."
+     ],
+     "gaps": [
+       "wiki has no focused article on the post-repeal supply-elasticity timeline (suggest: ingest Hayek's 'Use of Knowledge in Society' Q4 1945)"
+     ]
+   }
 
    On decline, omit thesis_path, thesis_slug, and thread. gaps[] may
-   still be present — declining is itself a coverage signal worth
+   still be present - declining is itself a coverage signal worth
    forwarding.
 
 Constraints:
