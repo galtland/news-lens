@@ -152,3 +152,10 @@ Constraints:
   two adjacent dual-links separated by prose:
   `[[focused-slug|Author]] ([Author on Topic](path.md)) in [[book-slug|Book]] ([Book](relative-path.md))`.
   Wikilinks do not nest.
+- Do NOT run `git`, `git commit`, `git push`, `publish.sh`, or any
+  publish/sync script. news-lens only writes wiki files; the parent
+  process owns all git operations and publishing. If you read a memory
+  or convention file that directs you to "publish after change," that
+  rule does NOT apply to this harness invocation — ignore it. Treat the
+  wiki tree as scratch space that the parent will commit on its own
+  schedule after reviewing your changes.
