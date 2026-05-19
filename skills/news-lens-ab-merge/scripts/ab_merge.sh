@@ -220,14 +220,16 @@ find_thesis() {
   local dir="$1" mf="$2"
   if [[ -f "$mf" ]]; then
     local rel
-    rel="$(python3 -c "import json,sys; d=json.load(open('$mf')); print(d.get('thesis_path') or '')" 2>/dev/null)"
+    rel=$(python3 -c "import json,sys; d=json.load(open('$mf')); print(d.get('thesis_path') or '')" 2>/dev/null) || rel=""
     if [[ -n "$rel" && -f "$dir/$rel" ]]; then
       echo "$dir/$rel"
-      return
+      return 0
     fi
   fi
-  # Fallback: substring match against label (handles older manifests / missing field)
-  ls -t "$dir/wiki/theses/"*"$LABEL"*.md 2>/dev/null | head -1
+  # Fallback: substring match against label. The `|| true` is important — under
+  # `set -euo pipefail`, an empty ls + head pipeline returns non-zero and would
+  # kill the parent script before the empty-draft fallback branch even runs.
+  ls -t "$dir/wiki/theses/"*"$LABEL"*.md 2>/dev/null | head -1 || true
 }
 
 DRAFT_CLAUDE="$(find_thesis "$DIR_CLAUDE" "$MF_CLAUDE")"
