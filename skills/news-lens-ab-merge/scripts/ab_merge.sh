@@ -213,14 +213,25 @@ MF_CODEX="$DIR_CODEX/.news-lens/$LABEL.json"
 [[ -f "$MF_CLAUDE" ]] || echo "[warn] claude draft missing — manifest not at $MF_CLAUDE" >&2
 [[ -f "$MF_CODEX"  ]] || echo "[warn] codex draft missing — manifest not at $MF_CODEX" >&2
 
-# Find the new thesis files (date-prefixed, agent's slug)
+# Find the new thesis file using the manifest's own thesis_path (the agent's own slug,
+# which is often more descriptive than the scratch LABEL — e.g. "imf-conditionality-
+# carbon-wage-planning" instead of "imf-conditionality-test").
 find_thesis() {
-  local dir="$1"
+  local dir="$1" mf="$2"
+  if [[ -f "$mf" ]]; then
+    local rel
+    rel="$(python3 -c "import json,sys; d=json.load(open('$mf')); print(d.get('thesis_path') or '')" 2>/dev/null)"
+    if [[ -n "$rel" && -f "$dir/$rel" ]]; then
+      echo "$dir/$rel"
+      return
+    fi
+  fi
+  # Fallback: substring match against label (handles older manifests / missing field)
   ls -t "$dir/wiki/theses/"*"$LABEL"*.md 2>/dev/null | head -1
 }
 
-DRAFT_CLAUDE="$(find_thesis "$DIR_CLAUDE")"
-DRAFT_CODEX="$(find_thesis "$DIR_CODEX")"
+DRAFT_CLAUDE="$(find_thesis "$DIR_CLAUDE" "$MF_CLAUDE")"
+DRAFT_CODEX="$(find_thesis "$DIR_CODEX" "$MF_CODEX")"
 
 # Fallback handling if one backend failed
 SKIP_MERGE=0
@@ -270,27 +281,83 @@ CLEAN="$OUTDIR/$LABEL-merge-clean.md"
 [[ -s "$CLEAN" ]] || { echo "[fatal] merge clean output empty" >&2; exit 1; }
 
 # Voice rule sanity check
-WIKI_MENTIONS="$(grep -c "the wiki\|wiki's" "$CLEAN" || echo 0)"
+WIKI_MENTIONS=$(grep -c "the wiki\|wiki's" "$CLEAN" 2>/dev/null) || WIKI_MENTIONS=0
 if [[ "$WIKI_MENTIONS" -gt 0 ]]; then
   echo "[warn] merged thesis has $WIKI_MENTIONS 'the wiki' mentions — lens voice rule violated" >&2
 fi
 
-# Stage 7: promote — adjust dates to match live raw/news
+# Stage 7: promote — adjust dates to match live raw/news, copy any new focused
+# articles + raw/news created by the agent during drafting.
 PROMOTE_TARGET=""
+PROMOTE_SLUG=""
 if [[ -n "$TARGET_THESIS" ]]; then
   PROMOTE_TARGET="$LIVE_WIKI/wiki/theses/$TARGET_THESIS"
+  PROMOTE_SLUG="${TARGET_THESIS%.md}"
 else
-  PROMOTE_TARGET="$LIVE_WIKI/wiki/theses/$(date +%Y-%m-%d)-$LABEL.md"
+  # New-news case: take the agent's own thesis_slug (more descriptive than LABEL).
+  for MF in "$MF_CLAUDE" "$MF_CODEX"; do
+    [[ -f "$MF" ]] || continue
+    AGENT_SLUG="$(python3 -c "import json,sys; d=json.load(open('$MF')); print(d.get('thesis_slug') or '')" 2>/dev/null)"
+    if [[ -n "$AGENT_SLUG" ]]; then
+      PROMOTE_TARGET="$LIVE_WIKI/wiki/theses/$AGENT_SLUG.md"
+      PROMOTE_SLUG="$AGENT_SLUG"
+      break
+    fi
+  done
+  # Last-resort fallback: today-dated LABEL
+  if [[ -z "$PROMOTE_TARGET" ]]; then
+    PROMOTE_TARGET="$LIVE_WIKI/wiki/theses/$(date +%Y-%m-%d)-$LABEL.md"
+    PROMOTE_SLUG="$(date +%Y-%m-%d)-$LABEL"
+  fi
 fi
 echo "[promote] target: $PROMOTE_TARGET" >&2
 
+# Copy any focused articles the agent created that don't exist in live yet.
+# Source: prefer codex's trial dir (codex is the merger and tends to have the
+# most complete focused-article set), fall back to claude's.
+copy_new_focused() {
+  local src_dir="$1"
+  [[ -d "$src_dir/wiki/concepts" ]] || return
+  local count=0
+  for f in "$src_dir/wiki/concepts/"*.md; do
+    [[ -f "$f" ]] || continue
+    local bn; bn="$(basename "$f")"
+    [[ "$bn" == "_index.md" ]] && continue
+    if [[ ! -f "$LIVE_WIKI/wiki/concepts/$bn" ]]; then
+      cp "$f" "$LIVE_WIKI/wiki/concepts/$bn"
+      echo "[promote] new focused article: $bn" >&2
+      count=$((count + 1))
+    fi
+  done
+  echo "$count"
+}
+NEW_FOCUSED_COUNT="$(copy_new_focused "$DIR_CODEX")"
+if [[ "$NEW_FOCUSED_COUNT" == "0" ]]; then
+  NEW_FOCUSED_COUNT="$(copy_new_focused "$DIR_CLAUDE")"
+fi
+
+# Copy the raw/news file the merged thesis references.
+RAW_REF="$(grep -oE 'raw/news/[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+\.md' "$CLEAN" | head -1)"
+if [[ -n "$RAW_REF" && ! -f "$LIVE_WIKI/$RAW_REF" ]]; then
+  for d in "$DIR_CODEX" "$DIR_CLAUDE"; do
+    if [[ -f "$d/$RAW_REF" ]]; then
+      cp "$d/$RAW_REF" "$LIVE_WIKI/$RAW_REF"
+      echo "[promote] new raw/news: $RAW_REF" >&2
+      break
+    fi
+  done
+fi
+
+# Write the thesis. Adjust raw/news date refs if there's an existing live raw
+# with a different date than the merge's generated one.
 if [[ -n "$LIVE_RAW_NEWS" && -n "$LIVE_RAW_DATE" ]]; then
   TODAY="$(date +%Y-%m-%d)"
   sed -e "s|raw/news/$TODAY-|raw/news/$LIVE_RAW_DATE-|g" "$CLEAN" > "$PROMOTE_TARGET"
 else
   cp "$CLEAN" "$PROMOTE_TARGET"
-  RAW_REF="$(grep -oE 'raw/news/[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+\.md' "$CLEAN" | head -1)"
-  if [[ -n "$RAW_REF" ]]; then
+  # legacy fallback already handled above; keep this branch for the case where
+  # somehow the raw file wasn't picked up — try one more time from drafts.
+  if [[ -n "$RAW_REF" && ! -f "$LIVE_WIKI/$RAW_REF" ]]; then
     SRC=""
     for d in "$DIR_CLAUDE" "$DIR_CODEX"; do
       [[ -f "$d/$RAW_REF" ]] && SRC="$d/$RAW_REF" && break
