@@ -28,7 +28,10 @@ when the path is `/home/user/wiki/topics/libertarian`). Pass that slug to
 every wiki skill invocation via `--wiki <slug>`.
 
 Task:
-1. File the news verbatim as raw/news/<slug>.md using /wiki:ingest. The slug
+1. File the news verbatim as raw/news/<slug>.md using the wiki ingest skill
+   (claude: `/wiki:ingest <source> --wiki <slug>`; codex: invoke via `@wiki`
+   or natural language — "Use the wiki manager skill to ingest this news
+   text into the <slug> topic wiki as raw/news/<file>.md"). The slug
    defaults to {{CANDIDATE_SLUG}}; pick a different slug only if that one
    would collide with an existing file. Frontmatter must match the wiki's
    raw-source schema (linting.md C2 — title, source, type, ingested, tags,
@@ -51,9 +54,19 @@ Task:
    reserved for news-lens-side errors. If you genuinely cannot complete
    the task, return decline.
 3. If not decline:
-   - Discover wiki coverage via /wiki:query. Invoke:
-       /wiki:query --wiki <slug> --deep "<one-sentence question that
-       names the substantive claim or framing the news engages>"
+   - Discover wiki coverage via the wiki manager skill in deep-query mode.
+     The invocation syntax depends on your backend:
+       * In claude, run as a slash command:
+         `/wiki:query --wiki <slug> --deep "<question>"`
+       * In codex, the same plugin is installed but `/wiki:*` slash
+         commands are not registered. Invoke the wiki skill via `@wiki`
+         or natural language — for example:
+         "Use the wiki manager skill in deep mode to query the <slug>
+         topic wiki: <question>. Return the Sources used section and the
+         Knowledge gaps section verbatim."
+     Either way, the same workflow runs (3-hop index navigation, See Also
+     chains, raw source scan) and returns the same four labeled sections.
+
      Phrase the question to name the WIKI FRAMES the news touches, not
      the news event itself. For an EU wealth-tax directive, ask
      `what does the wiki say about wealth taxes, capital consumption,
@@ -62,8 +75,7 @@ Task:
      The question primes the wiki's analytic frames; the news provides
      the instance.
 
-     /wiki:query --deep returns four labeled sections you must read in
-     full:
+     The wiki query returns four labeled sections you must read in full:
        * The answer prose — identifies which frames are load-bearing
          for this case
        * `Sources used:` — list of articles with confidence levels;
@@ -75,12 +87,12 @@ Task:
          gaps[] field of the final JSON. Do NOT fabricate gaps the
          query did not produce.
 
-     If /wiki:query reports zero relevant articles, prefer decline
+     If the wiki query reports zero relevant articles, prefer decline
      (the wiki has nothing substantive to add) rather than stretching
      an unrelated frame. Forward the query's gaps[] regardless of
      stance — declining a news item is itself a signal about coverage.
 
-     Do NOT supplement /wiki:query with ad-hoc Read/Glob/Grep through
+     Do NOT supplement the wiki query with ad-hoc Read/Glob/Grep through
      `wiki/{concepts,topics,references}/`. The query already did that
      work via its 3-hop and full-index passes; redoing it manually
      reintroduces the priming-by-author-list bias the trimmed lens
@@ -88,7 +100,7 @@ Task:
      article body that `Sources used:` named — that is appropriate.
    - List wiki/theses/ filenames via Glob to check whether an existing
      thesis already covers the substantive claim this post would
-     advance. Use Glob, not /wiki:query — this is a filename check, not
+     advance. Use Glob, not the wiki query skill — this is a filename check, not
      a content query. Do NOT read existing thesis bodies — avoid
      feedback loops where your commentary echoes prior commentary.
        - If an existing thesis already covers it: set thesis_path /
@@ -97,7 +109,7 @@ Task:
          at the existing thesis. Proceed to build the thread.
        - If no existing thesis covers it: continue with the steps below
          to draft a new one.
-   - Draft a thesis article. Cite the wiki articles /wiki:query named
+   - Draft a thesis article. Cite the wiki articles the wiki query named
      in its `Sources used:` section, using the wiki's dual link style:
        [[slug|Title]] ([Title](relative-path.md))
      where relative-path is from wiki/theses/ to the cited article (for
@@ -126,7 +138,7 @@ Task:
        `<author-last-name>-on-<topic-keyword>` (e.g.,
        `mises-on-rent-ceilings`, `rothbard-on-price-controls`).
        - If the focused article already exists (it appeared in
-         /wiki:query's `Sources used:` section, or you found it via
+         the wiki query's `Sources used:` section, or you found it via
          Glob), link to it.
        - If not, write it at `wiki/concepts/<slug>.md` BEFORE building
          the thread. Format:
@@ -156,7 +168,12 @@ Task:
        or `See full thesis: <URL>` — not bare `Thesis:`. The longer
        label signals to the reader that the link goes to a synthesized
        argument, not another quotation.
-4. Run /wiki:lint --fix --wiki <slug> to heal indexes, See Also
+4. Run the wiki lint skill in --fix mode against the target wiki:
+   - In claude: `/wiki:lint --fix --wiki <slug>`.
+   - In codex: invoke the wiki skill via `@wiki` or natural language —
+     e.g., "Run the wiki lint skill on the <slug> topic wiki in fix
+     mode."
+   The lint pass heals indexes, See Also
    backlinks, and log.md.
 5. Write the final run manifest as a JSON file at `{{MANIFEST_PATH}}`.
    This is the exact path selected by the harness. It lives at
@@ -181,11 +198,11 @@ Task:
    - `gaps` (optional)
 
    The `gaps[]` field carries the `Knowledge gaps:` entries from
-   /wiki:query --deep verbatim, one per array element. Each entry is a
+   the deep wiki query verbatim, one per array element. Each entry is a
    one-sentence statement of what the wiki does not cover that would
    have helped, with an optional trailing `(suggest: ingest <source>)`
-   clause when /wiki:query named a specific source to ingest. Omit
-   `gaps[]` only when /wiki:query reported no gaps. The harness persists
+   clause when the wiki query named a specific source to ingest. Omit
+   `gaps[]` only when the wiki query reported no gaps. The harness persists
    gaps to the state DB and surfaces them via the `news-lens gaps`
    subcommand; do not invent gaps the query did not produce.
 
