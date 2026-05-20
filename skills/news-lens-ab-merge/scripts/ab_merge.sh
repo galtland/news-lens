@@ -156,7 +156,19 @@ write_toml() {
   local cmd args
   if [[ "$backend" == "claude" ]]; then
     cmd="claude"
-    args='["--print", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep,Skill"]'
+    # --output-format=stream-json fixes a claude --print quirk where the agent
+    # sometimes exits cleanly without writing the manifest file (mode 2 in the
+    # debug session). Switching to stream-json + --include-partial-messages
+    # restored reliable completion. The harness reads the manifest from the
+    # filesystem, not from stdout, so the change is safe.
+    #
+    # Tool set: minimal set that reliably completes. Tested 2026-05-20: adding
+    # WebSearch/WebFetch (with or without Task/TaskOutput/TaskStop/Monitor)
+    # causes claude --print to bail before writing the manifest — no stdout,
+    # no tool dispatches, just exit 1 with empty output. Skill is required
+    # for /wiki:query, /wiki:ingest, /wiki:lint invocations that the prompt
+    # directs.
+    args='["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep,Skill"]'
   else
     cmd="codex"
     args="[\"exec\", \"--dangerously-bypass-approvals-and-sandbox\", \"-C\", \"$dir\", \"--skip-git-repo-check\"]"
