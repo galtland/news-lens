@@ -396,9 +396,16 @@ else
   echo "[publish] skipped (--no-publish)" >&2
 fi
 
-# Summary
-STANCE="$(grep -h '"stance"' "$MF_CLAUDE" "$MF_CODEX" 2>/dev/null | head -1 | grep -oE '"[a-z]+"' | tail -1 | tr -d '"')"
-CITES="$(grep -oE '\[\[[a-z0-9-]+' "$PROMOTE_TARGET" | sort -u | wc -l)"
+# Summary — be tolerant of missing manifest files under `set -euo pipefail`.
+MFS=()
+[[ -f "$MF_CLAUDE" ]] && MFS+=("$MF_CLAUDE")
+[[ -f "$MF_CODEX"  ]] && MFS+=("$MF_CODEX")
+STANCE=""
+if (( ${#MFS[@]} > 0 )); then
+  STANCE=$(grep -h '"stance"' "${MFS[@]}" 2>/dev/null \
+    | head -1 | grep -oE '"[a-z]+"' | tail -1 | tr -d '"' || true)
+fi
+CITES=$(grep -oE '\[\[[a-z0-9-]+' "$PROMOTE_TARGET" 2>/dev/null | sort -u | wc -l || echo 0)
 
 cat <<EOF
 ========================================
