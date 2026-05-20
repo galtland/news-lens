@@ -381,22 +381,19 @@ if [[ -n "$RAW_REF" && ! -f "$LIVE_WIKI/$RAW_REF" ]]; then
   done
 fi
 
-# Write the thesis. Adjust raw/news date refs if there's an existing live raw
-# with a different date than the merge's generated one.
-if [[ -n "$LIVE_RAW_NEWS" && -n "$LIVE_RAW_DATE" ]]; then
-  TODAY="$(date +%Y-%m-%d)"
-  sed -e "s|raw/news/$TODAY-|raw/news/$LIVE_RAW_DATE-|g" "$CLEAN" > "$PROMOTE_TARGET"
-else
-  cp "$CLEAN" "$PROMOTE_TARGET"
-  # legacy fallback already handled above; keep this branch for the case where
-  # somehow the raw file wasn't picked up — try one more time from drafts.
-  if [[ -n "$RAW_REF" && ! -f "$LIVE_WIKI/$RAW_REF" ]]; then
-    SRC=""
-    for d in "$DIR_CLAUDE" "$DIR_CODEX"; do
-      [[ -f "$d/$RAW_REF" ]] && SRC="$d/$RAW_REF" && break
-    done
-    [[ -n "$SRC" ]] && cp "$SRC" "$LIVE_WIKI/$RAW_REF"
-  fi
+# Write the thesis verbatim — the agent's raw/news references are canonical.
+# (Earlier versions of this script tried to date-substitute the thesis's
+# raw/news references to match a previous live raw/news date prefix; that
+# broke when the agent generated a fresh slug instead of reusing the old
+# one. Better to just let each re-run produce its own dated raw/news and
+# leave the thesis pointing at the agent's new file.)
+cp "$CLEAN" "$PROMOTE_TARGET"
+if [[ -n "$RAW_REF" && ! -f "$LIVE_WIKI/$RAW_REF" ]]; then
+  SRC=""
+  for d in "$DIR_CODEX" "$DIR_CLAUDE"; do
+    [[ -f "$d/$RAW_REF" ]] && SRC="$d/$RAW_REF" && break
+  done
+  [[ -n "$SRC" ]] && cp "$SRC" "$LIVE_WIKI/$RAW_REF"
 fi
 
 echo "[promote] wrote $PROMOTE_TARGET" >&2
