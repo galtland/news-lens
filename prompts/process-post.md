@@ -100,15 +100,24 @@ Task:
      article body that `Sources used:` named — that is appropriate.
    - List wiki/theses/ filenames via Glob to check whether an existing
      thesis already covers the substantive claim this post would
-     advance. Use Glob, not the wiki query skill — this is a filename check, not
-     a content query. Do NOT read existing thesis bodies — avoid
-     feedback loops where your commentary echoes prior commentary.
-       - If an existing thesis already covers it: set thesis_path /
-         thesis_slug to that existing file. Do not write a new thesis,
-         do not duplicate. The thesis URL in the sources reply points
-         at the existing thesis. Proceed to build the thread.
-       - If no existing thesis covers it: continue with the steps below
-         to draft a new one.
+     advance. Use Glob to verify FILES EXIST ON DISK; do NOT trust
+     `_index.md` entries on their own — indexes can be stale during a
+     re-run, and references in the index do not guarantee the file
+     still exists. Do NOT read existing thesis bodies — avoid feedback
+     loops where your commentary echoes prior commentary.
+       - If a thesis file is currently present on disk AND covers the
+         claim: set `thesis_path` / `thesis_slug` to that existing
+         file. Confirm via Read or stat that the file exists at the
+         path before emitting the manifest. The thesis URL in the
+         sources reply points at the existing thesis. Proceed to
+         build the thread.
+       - Otherwise — including when the slug appears in an index but
+         the file is absent from disk — write a fresh thesis at a new
+         slug (typically `<YYYY-MM-DD>-<descriptive-slug>.md`). Set
+         `thesis_path` to the slug you actually wrote. The manifest's
+         `thesis_path` MUST point at a file you have written or
+         confirmed exists during this run; the news-lens harness
+         validates this and will reject the manifest otherwise.
    - Draft a thesis article. Cite the wiki articles the wiki query named
      in its `Sources used:` section, using the wiki's dual link style:
        [[slug|Title]] ([Title](relative-path.md))

@@ -106,7 +106,10 @@ if [[ -n "$LIVE_RAW_NEWS" ]]; then
 fi
 echo "[stage] live raw/news: ${LIVE_RAW_NEWS:-<none>}" >&2
 
-# Stage 2: stage two trial wikis (claude + codex) with thesis/focused/raw deleted
+# Stage 2: stage two trial wikis (claude + codex) with thesis/focused/raw deleted.
+# Also scrub stale references to the deleted thesis from indexes — otherwise the
+# agent reads e.g. wiki/theses/_index.md, sees the slug listed, and may emit a
+# manifest pointing at a slug whose file we just removed.
 stage_trial() {
   local backend="$1"
   local dir="$SCRATCH/lib-m-$LABEL-$backend"
@@ -114,14 +117,30 @@ stage_trial() {
   cp -r "$LIVE_WIKI" "$dir"
   rm -rf "$dir/.news-lens"
   if [[ -n "$TARGET_THESIS" ]]; then
+    local target_slug="${TARGET_THESIS%.md}"
     rm -f "$dir/wiki/theses/$TARGET_THESIS"
+    # Strip any index lines that reference the deleted thesis slug, so the
+    # agent doesn't try to "reuse" a slug whose file no longer exists.
+    for idx in "$dir/wiki/theses/_index.md" "$dir/_index.md" "$dir/log.md"; do
+      [[ -f "$idx" ]] || continue
+      grep -v "$target_slug" "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx" || true
+    done
     while IFS= read -r slug; do
       [[ -n "$slug" ]] || continue
       rm -f "$dir/wiki/concepts/$slug.md"
+      for idx in "$dir/wiki/concepts/_index.md" "$dir/_index.md"; do
+        [[ -f "$idx" ]] || continue
+        grep -v "$slug" "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx" || true
+      done
     done < <(detect_focused "$LIVE_WIKI/wiki/theses/$TARGET_THESIS")
   fi
   if [[ -n "$LIVE_RAW_NEWS" ]]; then
+    local raw_slug="${LIVE_RAW_NEWS%.md}"
     rm -f "$dir/raw/news/$LIVE_RAW_NEWS"
+    for idx in "$dir/raw/news/_index.md" "$dir/raw/_index.md" "$dir/_index.md"; do
+      [[ -f "$idx" ]] || continue
+      grep -v "$raw_slug" "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx" || true
+    done
   fi
   echo "$dir"
 }
