@@ -162,13 +162,15 @@ write_toml() {
     # restored reliable completion. The harness reads the manifest from the
     # filesystem, not from stdout, so the change is safe.
     #
-    # Tool set: minimal set that reliably completes. Tested 2026-05-20: adding
-    # WebSearch/WebFetch (with or without Task/TaskOutput/TaskStop/Monitor)
-    # causes claude --print to bail before writing the manifest — no stdout,
-    # no tool dispatches, just exit 1 with empty output. Skill is required
-    # for /wiki:query, /wiki:ingest, /wiki:lint invocations that the prompt
-    # directs.
-    args='["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep,Skill"]'
+    # Tool set: Skill + Web. The "DO NOT STOP HERE" guard in the prompt
+    # (added 2026-05-21) prevents the agent from treating the /wiki:query
+    # result as the final answer, which was the underlying cause of mode-2
+    # silent exits. Expanding past Skill+Web (e.g. adding Task/Monitor) still
+    # degrades reliability — those tools push the workflow further down the
+    # context window and the guard alone isn't enough. Skill is required for
+    # /wiki:query, /wiki:ingest, /wiki:lint; Web gives the agent reach for
+    # filling external-source gaps the wiki doesn't yet cover.
+    args='["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep,Skill,WebSearch,WebFetch"]'
   else
     cmd="codex"
     args="[\"exec\", \"--dangerously-bypass-approvals-and-sandbox\", \"-C\", \"$dir\", \"--skip-git-repo-check\"]"
