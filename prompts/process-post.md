@@ -87,6 +87,20 @@ Task:
          gaps[] field of the final JSON. Do NOT fabricate gaps the
          query did not produce.
 
+     **CRITICAL — DO NOT STOP HERE.** The wiki query result is INPUT
+     to your workflow, not the OUTPUT. The query produces a structured
+     answer-shaped artifact (Answer / Sources used / Related / Gaps),
+     and that artifact MIGHT LOOK like a complete deliverable — it is
+     not. Your deliverables are the THESIS file at `wiki/theses/<slug>.md`
+     AND the MANIFEST file at `{{MANIFEST_PATH}}`. The query is step
+     3 of a 5-step task; after reading the query result, continue to
+     drafting the thesis (step 3 continued), then run lint (step 4),
+     then write the manifest (step 5). Do NOT echo the query result
+     in your final stdout — it is internal scaffolding. Do NOT say
+     "here is my synthesized answer" or "I have sufficient material —
+     let me write the response." The query result is not a response;
+     it is research input you now use to write the thesis.
+
      If the wiki query reports zero relevant articles, prefer decline
      (the wiki has nothing substantive to add) rather than stretching
      an unrelated frame. Forward the query's gaps[] regardless of
