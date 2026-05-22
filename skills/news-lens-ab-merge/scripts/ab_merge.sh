@@ -170,7 +170,7 @@ write_toml() {
     # context window and the guard alone isn't enough. Skill is required for
     # /wiki:query, /wiki:ingest, /wiki:lint; Web gives the agent reach for
     # filling external-source gaps the wiki doesn't yet cover.
-    args='["--print", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep,Skill,WebSearch,WebFetch"]'
+    args='["--print", "--no-session-persistence", "--output-format", "stream-json", "--include-partial-messages", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools", "Bash,Edit,Write,Read,Glob,Grep,Skill,WebSearch,WebFetch"]'
   else
     cmd="codex"
     args="[\"exec\", \"--dangerously-bypass-approvals-and-sandbox\", \"-C\", \"$dir\", \"--skip-git-repo-check\"]"
