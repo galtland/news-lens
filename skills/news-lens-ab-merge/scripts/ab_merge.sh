@@ -400,6 +400,49 @@ fi
 
 echo "[promote] wrote $PROMOTE_TARGET" >&2
 
+# Final manifest at the live wiki path so downstream consumers
+# (e.g., newsroom build-thesis.sh) have a stable contract.
+WIKI_REPO_ROOT_FOR_MANIFEST="$(git -C "$LIVE_WIKI" rev-parse --show-toplevel 2>/dev/null || echo /home/user/wiki)"
+THESIS_REL="${PROMOTE_TARGET#$WIKI_REPO_ROOT_FOR_MANIFEST/}"
+RAW_REL=""
+if [[ -n "${RAW_REF:-}" ]]; then
+  LIVE_RAW_ABS="$LIVE_WIKI/$RAW_REF"
+  RAW_REL="${LIVE_RAW_ABS#$WIKI_REPO_ROOT_FOR_MANIFEST/}"
+fi
+THESIS_SLUG_FINAL="$(basename "$PROMOTE_TARGET" .md)"
+RAW_SLUG_FINAL=""
+[[ -n "$RAW_REL" ]] && RAW_SLUG_FINAL="$(basename "$RAW_REL" .md)"
+CITES_FINAL=$(grep -oE '\[\[[a-z0-9-]+' "$PROMOTE_TARGET" 2>/dev/null | sort -u | wc -l || echo 0)
+STANCE_FINAL=""
+for d in "$DIR_CODEX" "$DIR_CLAUDE"; do
+  if [[ -f "$d/.news-lens/$LABEL.json" ]]; then
+    STANCE_FINAL=$(jq -r '.stance // ""' "$d/.news-lens/$LABEL.json" 2>/dev/null || echo "")
+    [[ -n "$STANCE_FINAL" ]] && break
+  fi
+done
+[[ -z "$STANCE_FINAL" ]] && STANCE_FINAL="unknown"
+MERGED_FINAL="true"
+[[ "$SKIP_MERGE" == 1 ]] && MERGED_FINAL="false"
+LIVE_MANIFEST_DIR="$LIVE_WIKI/.news-lens"
+mkdir -p "$LIVE_MANIFEST_DIR"
+LIVE_MANIFEST_PATH="$LIVE_MANIFEST_DIR/$LABEL.json"
+jq -n \
+  --arg slug "$THESIS_SLUG_FINAL" \
+  --arg thesis_slug "$THESIS_SLUG_FINAL" \
+  --arg raw_slug "$RAW_SLUG_FINAL" \
+  --arg thesis_path "$THESIS_REL" \
+  --arg raw_path "$RAW_REL" \
+  --arg stance "$STANCE_FINAL" \
+  --argjson citations "$CITES_FINAL" \
+  --argjson merged "$MERGED_FINAL" \
+  --argjson skip_merge "$SKIP_MERGE" \
+  '{slug: $slug, thesis_slug: $thesis_slug, raw_slug: $raw_slug,
+    thesis_path: $thesis_path, raw_path: $raw_path,
+    stance: $stance, citations: $citations, merged: $merged,
+    skip_merge: $skip_merge}' \
+  > "$LIVE_MANIFEST_PATH"
+echo "[promote] wrote final manifest $LIVE_MANIFEST_PATH" >&2
+
 # Publish chain
 if [[ "$PUBLISH" == 1 ]]; then
   echo "[publish] publish.sh + git push (source + public)…" >&2
