@@ -25,17 +25,20 @@ open questions where I've picked a default but want explicit confirmation.
    queue server.
 2. **The wiki repo is the newsroom.** All newsroom state — issues, PRs,
    workflows, fetcher state, dedup file, feed list — lives in the wiki
-   repo (the source repo behind `topics/libertarian/`, not the public
-   Quartz-built repo). One repo, one set of permissions, no cross-repo
-   tokens. See §6.
+   hub repo at `git@github.com:douglaz/wiki.git` (the source repo,
+   distinct from the downstream Quartz-built `douglaz.github.io`).
+   One repo, one set of permissions, no cross-repo tokens. See §6.
+   The hub holds multiple topic wikis under `topics/<topic>/`; v1
+   operates on `topics/libertarian/` only.
 3. **news-lens is software, not state.** It's a CLI + skill installed on
    the runner (and on contributor machines). CI invokes it; the wiki
    repo never imports it as content. Versioned via the news-lens repo's
    own releases.
-4. **Thesis PRs are atomic — exactly two new files.** `raw/news/<slug>.md`
-   and `wiki/theses/<slug>.md`. No edits to indexes, no edits to
-   `log.md`, no edits to existing articles. Everything else is
-   post-merge.
+4. **Thesis PRs are atomic — exactly two new files.**
+   `topics/<topic>/raw/news/<slug>.md` and
+   `topics/<topic>/wiki/theses/<slug>.md`. No edits to indexes, no
+   edits to `log.md`, no edits to existing articles. Everything else
+   is post-merge.
 5. **Post-merge propagation is single-threaded and serialized.** Run as
    one workflow with `concurrency.group` so merges queue, never race.
 6. **Indexes are derived, not hand-edited.** `_index.md` files are
@@ -127,7 +130,7 @@ Everything below the dashed line runs inside the wiki repo.
       ▼
   pre-merge lint ─── structural lint (frontmatter, links, slug)
       │              reject PRs touching paths outside
-      │              raw/news/** and wiki/theses/**
+      │              topics/*/raw/news/** and topics/*/wiki/theses/**
       │
       ▼
   human review + merge
@@ -191,8 +194,9 @@ or the bundled `news-lens-ab-merge` skill.
   3. If the claude leg failed (`skip merge: 1`), continue — the
      codex-only draft is the artifact, flagged in the PR body.
   4. Read the manifest. Extract `slug`, `stance`, `citations`.
-  5. Commit `raw/news/<slug>.md` + `wiki/theses/<slug>.md` to the
-     branch (nothing else). Push the branch.
+  5. Commit `topics/libertarian/raw/news/<slug>.md` +
+     `topics/libertarian/wiki/theses/<slug>.md` to the branch
+     (nothing else). Push the branch.
   6. Open PR against `main`:
      - Title: `Thesis: <thesis title>`
      - Body: full thesis Markdown inlined + a "Builder summary" block
@@ -208,13 +212,13 @@ or the bundled `news-lens-ab-merge` skill.
 ### 3.3 Pre-merge lint (`pr-lint.yml`)
 
 - **Trigger**: `on: pull_request` with
-  `paths: ['wiki/theses/**', 'raw/news/**']`.
+  `paths: ['topics/*/wiki/theses/**', 'topics/*/raw/news/**']`.
 - **Behavior**:
   1. Run a structural subset of `news-lens lint` (frontmatter
      validity, link resolution, slug format). Not the full quality
      lint — that needs LLM and would gate every PR on flaky weather.
-  2. Reject PRs that touch any path other than `wiki/theses/` and
-     `raw/news/` — enforces §0.4.
+  2. Reject PRs that touch any path other than
+     `topics/*/wiki/theses/` and `topics/*/raw/news/` — enforces §0.4.
   3. Surface failures as a PR check.
 
 ### 3.4 Propagator (`propagate.yml`)
@@ -227,9 +231,11 @@ or the bundled `news-lens-ab-merge` skill.
   infinite loops.
 - **Behavior**:
   1. Identify newly-merged theses by diffing the push range.
-  2. Rebuild `_index.md` files under `wiki/`, `raw/`, and the master
-     `_index.md`. The Derived Index Protocol means this is just
-     re-scanning frontmatter and rewriting indexes deterministically.
+  2. Rebuild `_index.md` files under
+     `topics/libertarian/wiki/`, `topics/libertarian/raw/`, and the
+     topic's master `_index.md`. The Derived Index Protocol means
+     this is just re-scanning frontmatter and rewriting indexes
+     deterministically.
   3. Run `news-lens lint --fix` to repair See Also bidirectional
      links. For each new thesis, every outbound See Also gets a
      corresponding inbound link added to the cited article.
@@ -339,35 +345,37 @@ the version is itself a PR against the wiki repo (touches
 
 ## 7. Open questions
 
-1. **Wiki repo location and visibility.** The wiki source is currently
-   in `~/wiki/topics/libertarian/`. Is there already a git remote for
-   it? If not, we need to create one (public? private?). The Quartz
-   publish repo at https://douglaz.github.io is downstream of it.
-2. **Propagator push permissions.** The propagator commits directly to
+1. **Propagator push permissions.** The propagator commits directly to
    `main`, which collides with branch protection. Either: (a) exempt
    the bot identity, or (b) use a fine-grained token. (a) is simpler;
    (b) is more auditable.
-3. **PR check requirements.** Should pre-merge lint failure block
+2. **PR check requirements.** Should pre-merge lint failure block
    merge, or just annotate? Recommendation: block, but only if the
    structural lint is fast and deterministic enough not to become a
    merge-blocker on weather alone.
-4. **Failure visibility.** When the builder fails outright, do we
+3. **Failure visibility.** When the builder fails outright, do we
    open a PR with no thesis attached (just the log)? Or no PR at all,
    only an issue comment? Latter is cleaner.
-5. **News sources for v1.** A concrete list to drop in `feeds.yaml`.
+4. **News sources for v1.** A concrete list to drop in `feeds.yaml`.
    Candidates: Mises Wire RSS, ZeroHedge RSS, Cato @ Liberty, HN
    front-page filtered by economic/political keywords, Reuters
    business RSS, Bloomberg markets RSS. Pick 3–5.
-6. **Twitter path.** Track separately. If/when a workable read path
+5. **Twitter path.** Track separately. If/when a workable read path
    exists (Bluesky bridge? Nitter mirror? paid API?), add as another
    `feeds.yaml` source.
-7. **Backfill policy.** When the cron's been off for a while, should
+6. **Backfill policy.** When the cron's been off for a while, should
    the next run flood-fill or skip ahead? §3.1 caps at 10/cycle as a
    safety; decide whether that's right.
-8. **news-lens version pinning strategy.** Self-hosted runner gets
+7. **news-lens version pinning strategy.** Self-hosted runner gets
    whatever is checked out locally — fine for v1 but means CI
    behavior changes silently when you `git pull` in news-lens.
    Acceptable trade for v1 simplicity?
+8. **Wiki repo public or private?** Resolved as a location question
+   (`git@github.com:douglaz/wiki.git` exists), but visibility — public
+   or private — is a separate decision. Public means anyone can read
+   theses pre-publish; private means the bot, contributors, and
+   GitHub Pages need access setup. Recommendation: public, since the
+   end product is already public via Quartz.
 
 ---
 
@@ -375,15 +383,16 @@ the version is itself a PR against the wiki repo (touches
 
 Each phase ends at a demonstrable state.
 
-### Phase A — Wiki repo skeleton
+### Phase A — Newsroom scaffolding in the wiki repo
 
-- Confirm/create the wiki source repo on GitHub (see §7.1).
-- Push current `~/wiki/` contents (or just `topics/libertarian/` if
-  multi-topic deferred) as initial commit.
-- Add `newsroom/` directory with placeholder `feeds.yaml` and empty
-  `seen-urls.txt`.
-- Validates: the repo exists, the layout matches what news-lens
-  expects, publish.sh still works from a fresh clone.
+- Wiki repo already exists at `git@github.com:douglaz/wiki.git`,
+  hub layout with `topics/libertarian/` populated. No content
+  migration needed.
+- Add `newsroom/` directory at hub root with placeholder
+  `feeds.yaml` and empty `seen-urls.txt`.
+- Confirm visibility (public/private — see §7.8).
+- Validates: the layout matches what news-lens expects;
+  publish.sh still works untouched.
 
 ### Phase B — Manual builder workflow
 
@@ -414,7 +423,7 @@ Each phase ends at a demonstrable state.
 ### Phase E — Fetcher
 
 - Add `fetch.yml` cron workflow reading `newsroom/feeds.yaml`.
-- Populate `feeds.yaml` with the 3–5 sources chosen in §7.5.
+- Populate `feeds.yaml` with the 3–5 sources chosen in §7.4.
 - Validates: full loop runs untouched for a day; theses appear as
   PRs without any manual step.
 
