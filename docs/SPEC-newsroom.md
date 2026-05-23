@@ -30,6 +30,12 @@ open questions where I've picked a default but want explicit confirmation.
    One repo, one set of permissions, no cross-repo tokens. See §6.
    The hub holds multiple topic wikis under `topics/<topic>/`; v1
    operates on `topics/libertarian/` only.
+   **Visibility: private.** `topics/<topic>/raw/news/` stores fetched
+   article text verbatim for provenance, which may include
+   copyrighted material — the legal posture isn't certain, so the
+   conservative default is to keep the source repo private. The
+   public face is the Quartz site, which only publishes commentary
+   (`wiki/theses/`), not the raw sources.
 3. **news-lens is software, not state.** It's a CLI + skill installed on
    the runner (and on contributor machines). CI invokes it; the wiki
    repo never imports it as content. Versioned via the news-lens repo's
@@ -370,12 +376,6 @@ the version is itself a PR against the wiki repo (touches
    whatever is checked out locally — fine for v1 but means CI
    behavior changes silently when you `git pull` in news-lens.
    Acceptable trade for v1 simplicity?
-8. **Wiki repo public or private?** Resolved as a location question
-   (`git@github.com:douglaz/wiki.git` exists), but visibility — public
-   or private — is a separate decision. Public means anyone can read
-   theses pre-publish; private means the bot, contributors, and
-   GitHub Pages need access setup. Recommendation: public, since the
-   end product is already public via Quartz.
 
 ---
 
@@ -390,7 +390,6 @@ Each phase ends at a demonstrable state.
   migration needed.
 - Add `newsroom/` directory at hub root with placeholder
   `feeds.yaml` and empty `seen-urls.txt`.
-- Confirm visibility (public/private — see §7.8).
 - Validates: the layout matches what news-lens expects;
   publish.sh still works untouched.
 
