@@ -50,6 +50,14 @@ async-trait = "0.1"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# Note: Cargo.lock will list sqlx-postgres + sqlx-mysql + rsa even though
+# we only enable the sqlite backend, because they are optional dependencies
+# of the `sqlx` meta-crate and Cargo's resolver records all optional-dep
+# candidates in the lockfile regardless of feature gating. `cargo tree -i
+# rsa --target all -e all` returns "nothing to print", confirming nothing
+# compiles or links rsa into our binary. RUSTSEC-2023-0071 is suppressed
+# for that reason in deny.toml; see GitHub issue #11.
+
 
 # Crypto/hashing
 sha2 = "0.10"

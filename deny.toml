@@ -1,0 +1,27 @@
+# cargo-deny configuration.
+#
+# Run via `cargo deny check` (in the dev shell).
+
+[advisories]
+# Lockfile-listed advisories that don't affect this binary because the
+# vulnerable crate is never actually compiled in.
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack against the `rsa` crate.
+    #
+    # The `rsa` crate appears in Cargo.lock as a transitive of
+    # `sqlx-postgres`, which is an OPTIONAL dependency of the `sqlx`
+    # meta-crate. We only enable the `sqlite` backend; the postgres
+    # backend is never built or linked. Verification:
+    #
+    #   cargo tree -i rsa --target all -e all
+    #     → "nothing to print" (no consumer in our build graph)
+    #
+    # Cargo's resolver records optional-dep candidates in Cargo.lock
+    # regardless of which features are enabled, so the entry persists.
+    # There is no upstream fix for the advisory.
+    #
+    # Re-evaluate when: a patched `rsa` releases, sqlx changes its
+    # optional-dep handling, or we migrate off the sqlx meta-crate.
+    # See https://github.com/douglaz/news-lens/issues/11.
+    "RUSTSEC-2023-0071",
+]
