@@ -6,7 +6,7 @@
 > skill exits.
 >
 > Driven by wiki repo issue
-> https://github.com/douglaz/wiki/issues/11 and the design decision
+> https://github.com/galtland/galtland-wiki-index/issues/11 and the design decision
 > recorded as a comment there.
 
 Status: **ready for implementation**, revision 1.

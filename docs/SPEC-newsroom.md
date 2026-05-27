@@ -25,8 +25,8 @@ open questions where I've picked a default but want explicit confirmation.
    queue server.
 2. **The wiki repo is the newsroom.** All newsroom state — issues, PRs,
    workflows, fetcher state, dedup file, feed list — lives in the wiki
-   hub repo at `git@github.com:douglaz/wiki.git` (the source repo,
-   distinct from the downstream Quartz-built `douglaz.github.io`).
+   hub repo at `git@github.com:galtland/galtland-wiki-index.git` (the source repo,
+   distinct from the downstream Quartz site at https://index.galtland.org/).
    One repo, one set of permissions, no cross-repo tokens. See §6.
    The hub holds multiple topic wikis under `topics/<topic>/`; v1
    operates on `topics/libertarian/` only.
@@ -335,7 +335,7 @@ Pinning happens by "whatever version is checked out on that machine."
 
 **Hosted runner (v2+).** Two viable paths:
 
-- *Nix flake* — workflows do `nix run github:douglaz/news-lens@<rev>
+- *Nix flake* — workflows do `nix run github:galtland/news-lens@<rev>
   -- <subcommand>`. Cached after first build. Trivially pinnable to a
   specific revision. Skill files come along in the flake output.
 - *Release binary* — news-lens publishes tagged releases with
@@ -385,7 +385,7 @@ Each phase ends at a demonstrable state.
 
 ### Phase A — Newsroom scaffolding in the wiki repo
 
-- Wiki repo already exists at `git@github.com:douglaz/wiki.git`,
+- Wiki repo already exists at `git@github.com:galtland/galtland-wiki-index.git`,
   hub layout with `topics/libertarian/` populated. No content
   migration needed.
 - Add `newsroom/` directory at hub root with placeholder
