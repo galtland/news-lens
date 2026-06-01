@@ -43,20 +43,25 @@ The skill assumes this environment (configurable via inputs, but these are the d
 - Libertarian wiki at `/home/user/wiki/topics/libertarian/`
 - Lens at `/home/user/wiki/topics/libertarian/lens-austrian-libertarian.md`
 - `publish.sh` at `/home/user/wiki/scripts/publish.sh`
-- Public Quartz repo at `/home/user/projects/douglaz.github.io/`
+- Public Quartz repo at `/home/user/projects/galtland.github.io/`
 
-Run `scripts/preflight.sh` to verify all of these exist before launching the pipeline. The preflight bails with a clear error if anything is missing.
+`scripts/ab_merge.sh` runs its own preflight at startup (the `[preflight]` block) and bails with a clear error if any tool or path is missing — there is no separate preflight script to run first.
 
 ## Inputs
 
 The skill needs:
 
-- `news_text` — the verbatim news text to comment on (required)
-- `item_label` — short slug used as the post-id and as the basename of the trial wiki directories (required). Examples: `argentina`, `fed`, `digital-euro`, `nato`, `wealth-tax`. The label does not need to match any existing thesis slug — it's only a scratch identifier.
+- `news_text` — the verbatim news text to comment on (required; `--text` or `--text-file`)
+- `item_label` — short slug used as the post-id and as the basename of the trial wiki directories (required; `--label`). Examples: `argentina`, `fed`, `digital-euro`, `nato`, `wealth-tax`. The label does not need to match any existing thesis slug — it's only a scratch identifier.
+- **provenance — required, exactly one of:**
+  - `--source <url-or-citation>` — the news is real and attributable; the value is recorded as the thesis source.
+  - `--scenario` — the input is a synthetic/illustrative prompt, NOT a confirmed event. The produced thesis is stamped as an illustrative scenario (`stance: scenario`, `confidence: low`, plus a "not a sourced event" banner) rather than published as if it were real news.
+
+  **The run aborts if neither is given.** This guard exists because the pipeline promotes and publishes its output as a live wiki thesis: in 2026-05 six unsourced/synthetic news fixtures (`source: ""` from the news-lens pipeline's own test path) were turned into published theses asserting events that never happened, and had to be relabeled by hand afterward. Never pass `--scenario` for real news, and never reach for the `NL_ALLOW_UNSOURCED=1` escape hatch (which forces scenario mode) to silence the guard on news you haven't actually sourced.
 
 Optional inputs (defaults are usually fine):
 - `live_wiki_path` (default `/home/user/wiki/topics/libertarian`)
-- `public_content_path` (default `/home/user/projects/douglaz.github.io/content`)
+- `public_content_path` (default `/home/user/projects/galtland.github.io/content`)
 - `news_lens_bin` (default `/home/user/news-lens/target/release/news-lens`)
 - `--no-publish` flag to stop after writing the merged thesis to live, without committing or publishing
 
@@ -64,21 +69,21 @@ If the user provides the news but not the label, derive a sensible label from th
 
 ## The workflow
 
-Run `scripts/ab_merge.sh` with the inputs. The script orchestrates all 7 stages:
+Run `scripts/ab_merge.sh` with the inputs. It is a single self-contained script — the stages below are inline phases of `ab_merge.sh` (its `# Stage N` markers and helper functions), **not** separate scripts. The stage names are descriptive; there is no `stage_trials.sh`, `promote.sh`, etc. to call.
 
-1. **Stage trial wikis** (`scripts/stage_trials.sh`) — Copy the live wiki to two scratch dirs (`/tmp/lib-m-<label>-claude/` and `/tmp/lib-m-<label>-codex/`). Detect the target thesis filename via slug match against `<label>` in `wiki/theses/`, then delete that thesis + any focused author-on-topic articles it cites + the matching `raw/news/` entry in both scratch dirs so the agents draft fresh. If no matching thesis exists yet (new news item), the deletes are no-ops.
+1. **Stage trial wikis** (Stage 2 in `ab_merge.sh`; `stage_trial()`) — Copy the live wiki to two scratch dirs (`/tmp/lib-m-<label>-claude/` and `/tmp/lib-m-<label>-codex/`). Detect the target thesis filename via slug match against `<label>` in `wiki/theses/`, then delete that thesis + any focused author-on-topic articles it cites + the matching `raw/news/` entry in both scratch dirs so the agents draft fresh. If no matching thesis exists yet (new news item), the deletes are no-ops.
 
-2. **Generate drafts in parallel** (`scripts/run_drafts.sh`) — Build two news-lens configs (one per backend) pointing at the trial wikis, then run `news-lens process --post <label> --text "<news>" --dry-run` in parallel. Both backends use the same prompt template at `/home/user/news-lens/prompts/process-post.md` and the same lens. Each writes its manifest to `<trial>/.news-lens/<label>.json`. Both succeed in ~5–15 min wall clock typical; claude can occasionally hit upstream API rate limits — if so, retry once after a 60s pause.
+2. **Generate drafts in parallel** (Stage 3-4; `run_draft()`) — Build two news-lens configs (one per backend) pointing at the trial wikis, then run `news-lens process --post <label> --text "<news>" --dry-run` in parallel. Both backends use the same prompt template at `/home/user/news-lens/prompts/process-post.md` and the same lens. Each writes its manifest to `<trial>/.news-lens/<label>.json`. Both succeed in ~5–15 min wall clock typical; claude can occasionally hit upstream API rate limits — if so, retry once after a 60s pause.
 
-3. **Build the merge prompt** (`scripts/build_merge_prompt.sh`) — Concatenate: the editorial lens (verbatim) + the news text + Draft A (claude's full thesis markdown) + Draft B (codex's full thesis markdown) + the merge instructions in `references/merge-instructions.md`. Write to `/tmp/nl-m-out/<label>-merge-prompt.md`.
+3. **Build the merge prompt** (Stage 5) — Concatenate: the editorial lens (verbatim) + the news text + Draft A (claude's full thesis markdown) + Draft B (codex's full thesis markdown) + the merge instructions in `references/merge-instructions.md`. Write to `/tmp/nl-m-out/<label>-merge-prompt.md`.
 
-4. **Run the merge** (`scripts/run_merge.sh`) — Invoke `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C /tmp` with stdin piped from the merge prompt. Capture stdout to `/tmp/nl-m-out/<label>-merge.out`. Codex prints session metadata + reasoning trace + the final agent message; the merged thesis lives after the "tokens used" line.
+4. **Run the merge** (Stage 5) — Invoke `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C /tmp` with stdin piped from the merge prompt. Capture stdout to `/tmp/nl-m-out/<label>-merge.out`. Codex prints session metadata + reasoning trace + the final agent message; the merged thesis lives after the "tokens used" line.
 
-5. **Extract the clean merge** (`scripts/extract_merge.sh`) — `awk '/^tokens used$/{p=1;next} p'` to skip everything before "tokens used", then strip the leading token-count line. Result is the merged thesis markdown at `/tmp/nl-m-out/<label>-merge-clean.md`.
+5. **Extract the clean merge** (Stage 5-6) — `awk '/^tokens used$/{p=1;next} p'` to skip everything before "tokens used", then strip the leading token-count line. Result is the merged thesis markdown at `/tmp/nl-m-out/<label>-merge-clean.md`.
 
-6. **Promote to live** (`scripts/promote.sh`) — The merge uses today's date for `raw_path` / `created` / `updated`, but live's `raw/news/` file has its own date prefix. Detect the live raw/news date prefix via filename match against the news content, then `sed`-substitute the merge's date references to point at the existing live raw/news file. Overwrite the live thesis at its canonical slug. Detect canonical slug by matching `<label>` against `wiki/theses/*.md`; if multiple match, pick the most recent.
+6. **Promote to live** (Stage 7; `complete_citation_coverage()`, `stamp_scenario()` when `--scenario`) — The merge uses today's date for `raw_path` / `created` / `updated`, but live's `raw/news/` file has its own date prefix. Detect the live raw/news date prefix via filename match against the news content, then `sed`-substitute the merge's date references to point at the existing live raw/news file. Overwrite the live thesis at its canonical slug. Detect canonical slug by matching `<label>` against `wiki/theses/*.md`; if multiple match, pick the most recent.
 
-7. **Publish chain** (`scripts/publish_and_push.sh`, skipped if `--no-publish`) — `publish.sh libertarian <public_content_path>` regenerates Quartz content. Then `git add -A && git commit -m "..." && git push` against both the source wiki repo and the public Quartz repo. The commit message names the news item, the workflow (A/B+merge), and the stance + cite list extracted from the merged manifest.
+7. **Publish chain** (final `[publish]` block, skipped if `--no-publish`) — `publish.sh libertarian <public_content_path>` regenerates Quartz content. Then `git add -A && git commit -m "..." && git push` against both the source wiki repo and the public Quartz repo. The commit message names the news item, the workflow (A/B+merge), and the stance + cite list extracted from the merged manifest.
 
 ## Outputs
 
