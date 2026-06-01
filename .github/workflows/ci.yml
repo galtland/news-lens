@@ -16,7 +16,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v12
 
       - name: Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v7
+        uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Rust fmt
         run: nix develop -c cargo fmt --all -- --check
