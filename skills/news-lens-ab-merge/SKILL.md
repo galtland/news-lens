@@ -43,7 +43,7 @@ The skill assumes this environment (configurable via inputs, but these are the d
 - Libertarian wiki at `/home/user/wiki/topics/libertarian/`
 - Lens at `/home/user/wiki/topics/libertarian/lens-austrian-libertarian.md`
 - `publish.sh` at `/home/user/wiki/scripts/publish.sh`
-- Public Quartz repo at `/home/user/projects/douglaz.github.io/`
+- Public Quartz repo at `/home/user/projects/galtland.github.io/`
 
 Run `scripts/preflight.sh` to verify all of these exist before launching the pipeline. The preflight bails with a clear error if anything is missing.
 
@@ -56,7 +56,7 @@ The skill needs:
 
 Optional inputs (defaults are usually fine):
 - `live_wiki_path` (default `/home/user/wiki/topics/libertarian`)
-- `public_content_path` (default `/home/user/projects/douglaz.github.io/content`)
+- `public_content_path` (default `/home/user/projects/galtland.github.io/content`)
 - `news_lens_bin` (default `/home/user/news-lens/target/release/news-lens`)
 - `--no-publish` flag to stop after writing the merged thesis to live, without committing or publishing
 
