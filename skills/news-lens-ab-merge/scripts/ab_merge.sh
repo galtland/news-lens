@@ -2,8 +2,23 @@
 # news-lens-ab-merge: orchestrate the A/B+merge thesis workflow
 #
 # Usage:
-#   ab_merge.sh --label <slug> --text <news-text> [--no-publish]
-#   ab_merge.sh --label <slug> --text-file <path> [--no-publish]
+#   ab_merge.sh --label <slug> --text <news-text> --source <url-or-citation> [--no-publish]
+#   ab_merge.sh --label <slug> --text-file <path> --source <url-or-citation> [--no-publish]
+#   ab_merge.sh --label <slug> --text <news-text> --scenario [--no-publish]
+#
+# Provenance guard (REQUIRED — exactly one of):
+#   --source <url-or-citation>   The news item is real and attributable; the
+#                                value is recorded as the thesis source.
+#   --scenario                   The news item is a synthetic/illustrative
+#                                prompt, NOT a confirmed event. The produced
+#                                thesis is stamped as an illustrative scenario
+#                                (stance: scenario, confidence: low, plus a
+#                                "not a sourced event" banner) instead of being
+#                                passed off as real news. This prevents
+#                                publishing fabricated events as fact (the
+#                                2026-05 incident where six unsourced fixtures
+#                                became live theses).
+#   The run aborts if neither is given.
 #
 # Environment overrides:
 #   NL_LIVE_WIKI         (default /home/user/wiki/topics/libertarian)
@@ -40,6 +55,8 @@ RAW_NEWS_REF_GREP_RE='raw/news/[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9]+(-[a-z0-9]+)*
 PUBLISH=1
 LABEL=""
 NEWS_TEXT=""
+NEWS_SOURCE=""
+SCENARIO=0
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -47,6 +64,8 @@ while [[ $# -gt 0 ]]; do
     --label)       LABEL="$2"; shift 2 ;;
     --text)        NEWS_TEXT="$2"; shift 2 ;;
     --text-file)   NEWS_TEXT="$(cat "$2")"; shift 2 ;;
+    --source)      NEWS_SOURCE="$2"; shift 2 ;;
+    --scenario)    SCENARIO=1; shift ;;
     --no-publish)  PUBLISH=0; shift ;;
     -h|--help)
       sed -n '2,/^set/p' "$0" | sed '$d' | sed 's/^# \?//'
@@ -57,6 +76,30 @@ done
 
 [[ -z "$LABEL" ]] && { echo "Missing --label" >&2; exit 2; }
 [[ -z "$NEWS_TEXT" ]] && { echo "Missing --text or --text-file" >&2; exit 2; }
+
+# Provenance guard: the pipeline promotes+publishes its output as a libertarian
+# wiki thesis, so the triggering news must be either (a) real and attributable
+# via --source, or (b) explicitly acknowledged as synthetic via --scenario (in
+# which case the thesis is stamped illustrative, not passed off as a real event).
+# Refusing the un-annotated case is what stops fabricated-event theses from
+# going live. NL_ALLOW_UNSOURCED=1 is an explicit, logged escape hatch.
+if [[ -n "$NEWS_SOURCE" && "$SCENARIO" == 1 ]]; then
+  echo "Provide only one of --source or --scenario, not both." >&2; exit 2
+fi
+if [[ -z "$NEWS_SOURCE" && "$SCENARIO" == 0 ]]; then
+  if [[ "${NL_ALLOW_UNSOURCED:-0}" == 1 ]]; then
+    echo "[guard] WARNING: no --source and no --scenario; NL_ALLOW_UNSOURCED=1 set — proceeding as UNSOURCED. The thesis will be stamped as an illustrative scenario." >&2
+    SCENARIO=1
+  else
+    echo "[guard] REFUSING: news provenance is required. Pass --source <url-or-citation> for real news, or --scenario for a synthetic/illustrative prompt (the thesis will be stamped as a scenario, not published as fact). Override with NL_ALLOW_UNSOURCED=1 only if you understand the risk." >&2
+    exit 2
+  fi
+fi
+if [[ "$SCENARIO" == 1 ]]; then
+  echo "[guard] mode: SCENARIO — output will be stamped as an illustrative scenario (not a sourced event)." >&2
+else
+  echo "[guard] mode: SOURCED — source: $NEWS_SOURCE" >&2
+fi
 if ! [[ "$LABEL" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
   echo "Invalid --label '$LABEL': labels must be lowercase slug segments joined by single hyphens" >&2
   exit 2
@@ -1368,6 +1411,50 @@ wiki_repo_root() {
   git -C "$LIVE_WIKI" rev-parse --show-toplevel 2>/dev/null || fallback_wiki_repo_root
 }
 
+# stamp_scenario <thesis-file>
+# Rewrite a merged thesis so it reads as an illustrative scenario rather than a
+# report of a real event: force stance/verdict/confidence in the frontmatter and
+# insert a "not a sourced event" admonition right after the first H1. Idempotent.
+# This is the on-disk counterpart of the --scenario guard; it is what keeps a
+# synthetic prompt from being published as fact.
+stamp_scenario() {
+  local f="$1" tmp has_banner
+  # Idempotent: don't add a second banner if one is already present.
+  if grep -q 'Illustrative scenario — not a sourced event' "$f"; then
+    has_banner=1
+  else
+    has_banner=0
+  fi
+  tmp="$(mktemp)"
+  awk -v has_banner="$has_banner" '
+    BEGIN { infm=0; fm_done=0; banner_done=has_banner }
+    NR==1 && $0=="---" { infm=1; print; next }
+    infm==1 && $0=="---" { infm=0; fm_done=1; print; next }
+    infm==1 {
+      if ($0 ~ /^stance:/)     { print "stance: scenario"; next }
+      if ($0 ~ /^verdict:/)    { print "verdict: illustrative-scenario"; next }
+      if ($0 ~ /^confidence:/) { print "confidence: low"; next }
+      print; next
+    }
+    fm_done==1 && banner_done==0 && /^# / {
+      print
+      print ""
+      print "> [!warning] Illustrative scenario — not a sourced event"
+      print "> The triggering item is a synthetic/illustrative prompt, not a confirmed news event. Specific figures, dates, and any attributed quotations are hypothetical and may not match the real-world record. What this page demonstrates is the framework application — do not cite the event details as fact."
+      banner_done=1
+      next
+    }
+    { print }
+  ' "$f" > "$tmp" && mv "$tmp" "$f"
+  # If the merge omitted stance/verdict/confidence entirely, inject them.
+  grep -qE '^stance:'     "$f" || sed -i '0,/^---$/{/^---$/a stance: scenario
+}' "$f"
+  grep -qE '^verdict:'    "$f" || sed -i '0,/^---$/{/^---$/a verdict: illustrative-scenario
+}' "$f"
+  grep -qE '^confidence:' "$f" || sed -i '0,/^---$/{/^---$/a confidence: low
+}' "$f"
+}
+
 # Stage 7: promote — complete citation coverage against the staged merged
 # thesis before overwriting the live thesis. This keeps a failed completion
 # pass from leaving unresolved links in wiki/theses/.
@@ -1422,6 +1509,10 @@ complete_citation_coverage "$CLEAN" "$WIKI_REPO_ROOT_FOR_MANIFEST" "$NEW_ARTICLE
 install_promote_exit_trap
 begin_promote_rollback "$PROMOTE_TARGET" "$INSTALLED_ARTICLES_FILE"
 promote_raw_news_if_needed "$RAW_REF" "$INSTALLED_ARTICLES_FILE"
+if [[ "$SCENARIO" == 1 ]]; then
+  echo "[promote] stamping thesis as an illustrative scenario (unsourced input)" >&2
+  stamp_scenario "$CLEAN"
+fi
 cp "$CLEAN" "$PROMOTE_TARGET"
 install_staged_articles "$STAGED_ARTICLES_TSV" "$NEW_ARTICLES_JSONL" "$INSTALLED_ARTICLES_FILE"
 verify_live_citation_coverage "$PROMOTE_TARGET" "$CITATION_ATTEMPTS_FILE"
