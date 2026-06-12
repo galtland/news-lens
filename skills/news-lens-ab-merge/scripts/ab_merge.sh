@@ -454,13 +454,37 @@ H
     cat "$MERGE_INSTRUCTIONS"
   } > "$PROMPT"
 
-  echo "[merge] running codex exec with merge prompt ($(wc -l < "$PROMPT") lines)…" >&2
-  codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C "$SCRATCH" \
-    < "$PROMPT" > "$OUTDIR/$LABEL-merge.out" 2>&1
+  # Merge with claude (better at the synthesized opening than codex was — codex
+  # tended to weld both drafts' framings into one over-compressed lede). Mirror
+  # the claude article-draft invocation: prompt on stdin, read-only tools, cwd
+  # at SCRATCH (matches the old codex -C "$SCRATCH"). No timeout wrapper here —
+  # run_with_optional_timeout is defined later in the file, and the workflow's
+  # job-level timeout is the backstop, as it was for the old codex merge.
+  echo "[merge] running claude with merge prompt ($(wc -l < "$PROMPT") lines)…" >&2
+  (
+    cd "$SCRATCH" || exit 1
+    claude --print --no-session-persistence --max-turns 5 --permission-mode default \
+      --allowedTools "Read,Glob,Grep" \
+      --disallowedTools "Bash,Edit,Write" \
+      < "$PROMPT" > "$OUTDIR/$LABEL-merge.out" 2> "$OUTDIR/$LABEL-merge.err"
+  ) || echo "[merge] claude merge exited non-zero (see $OUTDIR/$LABEL-merge.err)" >&2
 
-  # Stage 6: extract clean merge
-  awk '/^tokens used$/{p=1; next} p' "$OUTDIR/$LABEL-merge.out" \
-    | sed '1{/^[0-9,]*$/d}' > "$OUTDIR/$LABEL-merge-clean.md"
+  # Stage 6: extract clean merge — keep content from the first frontmatter
+  # delimiter, ignoring any CLI accounting prelude (matches extract_article_content).
+  awk 'found || /^---$/ { found=1; print }' "$OUTDIR/$LABEL-merge.out" \
+    > "$OUTDIR/$LABEL-merge-clean.md"
+
+  # Fallback: claude's content filter can non-deterministically block output on
+  # some topics (revolution/resistance framings), yielding empty/frontmatter-less
+  # output. Fall back to the codex merge so those items still produce a thesis.
+  if [[ ! -s "$OUTDIR/$LABEL-merge-clean.md" ]]; then
+    echo "[merge] claude produced no usable merge; falling back to codex exec" >&2
+    codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C "$SCRATCH" \
+      < "$PROMPT" > "$OUTDIR/$LABEL-merge.out" 2>&1 \
+      || echo "[merge] codex fallback exited non-zero" >&2
+    awk '/^tokens used$/{p=1; next} p' "$OUTDIR/$LABEL-merge.out" \
+      | sed '1{/^[0-9,]*$/d}' > "$OUTDIR/$LABEL-merge-clean.md"
+  fi
 fi
 
 CLEAN="$OUTDIR/$LABEL-merge-clean.md"
@@ -688,8 +712,8 @@ article_dest_for_kind() {
 
 select_article_backend() {
   local skip_merge="$1" draft_codex="$2"
-  # When the merge step ran, the codex workspace is already warm, so prefer it
-  # for the citation-completion articles.
+  # Codex drafted leg B, so prefer it for the citation-completion stub articles
+  # (the merge itself now runs on claude, with codex only as the merge fallback).
   if [[ "$skip_merge" == 0 || -n "$draft_codex" ]]; then
     echo "codex"
   else
@@ -1580,8 +1604,8 @@ if [[ "$PUBLISH" == 1 ]]; then
   git commit -m "Update $LABEL thesis via A/B+merge
 
 Generated through the news-lens-ab-merge skill: parallel claude + codex
-drafts, codex-merged into one coherent thesis following the current
-editorial lens." > /dev/null 2>&1 || echo "[warn] source commit empty/failed" >&2
+drafts, claude-merged (codex fallback) into one coherent thesis following
+the current editorial lens." > /dev/null 2>&1 || echo "[warn] source commit empty/failed" >&2
   git push > /dev/null 2>&1 && echo "[publish] source pushed" >&2 || echo "[warn] source push failed" >&2
   popd > /dev/null
 
