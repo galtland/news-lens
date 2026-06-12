@@ -455,17 +455,20 @@ H
   } > "$PROMPT"
 
   # Merge with claude (better at the synthesized opening than codex was — codex
-  # tended to weld both drafts' framings into one over-compressed lede). Mirror
-  # the claude article-draft invocation: prompt on stdin, read-only tools, cwd
-  # at SCRATCH (matches the old codex -C "$SCRATCH"). No timeout wrapper here —
-  # run_with_optional_timeout is defined later in the file, and the workflow's
-  # job-level timeout is the backstop, as it was for the old codex merge.
+  # tended to weld both drafts' framings into one over-compressed lede). The
+  # merge prompt is self-contained (both drafts are embedded), so run claude with
+  # NO read tools — a pure text synthesis. Crucially, do NOT give it Read/Glob/Grep:
+  # with cwd=$SCRATCH (=/tmp) and read tools it wandered the cluttered /tmp and
+  # blew the job's 30-min timeout. The merge needs no filesystem (the promote
+  # stage validates/creates any wikilink stubs afterward). --max-turns 5 matches
+  # the draft call; with no tools it completes in one turn (--max-turns 1 errors
+  # with "Reached max turns"). No timeout wrapper here (run_with_optional_timeout
+  # is defined later); the job-level timeout is the backstop, as for old codex.
   echo "[merge] running claude with merge prompt ($(wc -l < "$PROMPT") lines)…" >&2
   (
     cd "$SCRATCH" || exit 1
     claude --print --no-session-persistence --max-turns 5 --permission-mode default \
-      --allowedTools "Read,Glob,Grep" \
-      --disallowedTools "Bash,Edit,Write" \
+      --disallowedTools "Bash,Edit,Write,Read,Glob,Grep" \
       < "$PROMPT" > "$OUTDIR/$LABEL-merge.out" 2> "$OUTDIR/$LABEL-merge.err"
   ) || echo "[merge] claude merge exited non-zero (see $OUTDIR/$LABEL-merge.err)" >&2
 
